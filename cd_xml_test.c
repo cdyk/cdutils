@@ -1,7 +1,5 @@
 #include <stdio.h>
 
-#define CD_XML_LOG_ERROR(...) fprintf(stderr, __VA_ARGS__)
-#define CD_XML_IMPL
 #include "cd_xml.h"
 
 

@@ -1,8 +1,14 @@
+#include <stdio.h>
+#include <assert.h>
 #include "cd_xml.h"
 
-#ifndef CD_XML_LOG_ERROR
-#define CD_XML_LOG_ERROR(...) do ; while(0)
-#endif
+//#ifndef CD_XML_LOG_ERROR
+#define CD_XML_LOG_ERRORV(msg,...) fprintf(stderr, msg"\n", __VA_ARGS__)
+#define CD_XML_LOG_ERROR(msg) fprintf(stderr, msg"\n")
+#define CD_XML_LOG_DEBUGV(msg,...) fprintf(stderr, msg"\n", __VA_ARGS__)
+#define CD_XML_LOG_DEBUG(msg) fprintf(stderr, msg"\n")
+//#define CD_XML_LOG_ERROR(...) do ; while(0)
+//#endif
 
 typedef enum {
     CD_XML_TOKEN_EOF                    = 0,
@@ -179,7 +185,7 @@ restart:
             return;
         }
         else if((ctx->ptr[1] & 0xc0) != 0x80) {
-            CD_XML_LOG_ERROR("Illegal byte %u in 2-byte UTF-8 encoding", (unsigned)ctx->ptr[1]);
+            CD_XML_LOG_ERRORV("Illegal byte %u in 2-byte UTF-8 encoding", (unsigned)ctx->ptr[1]);
             ctx->current.kind = CD_XML_TOKEN_EOF;
             ctx->status = CD_XML_MALFORMED_UTF8;
             return;
@@ -198,7 +204,7 @@ restart:
         }
         for(size_t i=1; i<3; i++) {
             if((ctx->ptr[i] & 0xc0) != 0x80) {
-                CD_XML_LOG_ERROR("Byte %zu = %x illegal in 3-byte UTF-8 encoding", i, (unsigned)(ctx->ptr[1]));
+                CD_XML_LOG_ERRORV("Byte %zu = %x illegal in 3-byte UTF-8 encoding", i, (unsigned)(ctx->ptr[1]));
                 ctx->current.kind = CD_XML_TOKEN_EOF;
                 ctx->status = CD_XML_MALFORMED_UTF8;
                 return;
@@ -218,7 +224,7 @@ restart:
         }
         for(size_t i=1; i<4; i++) {
             if((ctx->ptr[i] & 0xc0) != 0x80) {
-                CD_XML_LOG_ERROR("Byte %zu = %x illegal in 4-byte UTF-8 encoding", i, (unsigned)(ctx->ptr[1]));
+                CD_XML_LOG_ERRORV("Byte %zu = %x illegal in 4-byte UTF-8 encoding", i, (unsigned)(ctx->ptr[1]));
                 ctx->current.kind = CD_XML_TOKEN_EOF;
                 ctx->status = CD_XML_MALFORMED_UTF8;
                 return;
@@ -229,10 +235,53 @@ restart:
         ctx->current.kind = CD_XML_TOKEN_UTF8;
     }
     else {
-        CD_XML_LOG_ERROR("Illegal UTF-8 start byte %u", (unsigned)*ctx->ptr);
+        CD_XML_LOG_ERRORV("Illegal UTF-8 start byte %u", (unsigned)*ctx->ptr);
         ctx->current.kind = CD_XML_TOKEN_EOF;
         ctx->status = CD_XML_MALFORMED_UTF8;
         return;
+    }
+}
+
+static bool cd_xml_match_token(cd_xml_ctx_t* ctx, cd_xml_token_kind_t token_kind)
+{
+    if(ctx->current.kind == token_kind) {
+        cd_xml_next_token(ctx);
+        return true;
+    }
+    return false;
+}
+
+static void cd_xml_parse_xml_decl(cd_xml_ctx_t* ctx, bool is_decl)
+{
+    assert(ctx->matched.kind == is_decl ? CD_XML_TOKEN_XML_DECL_START : CD_XML_TOKEN_PROC_INSTR_START);
+    const char* start = ctx->matched.begin;
+    while(ctx->status == CD_XML_SUCCESS) {
+        if(cd_xml_match_token(ctx, CD_XML_TOKEN_PROC_INSTR_STOP)) {
+            int len = (int)(ctx->matched.end - start);
+            CD_XML_LOG_DEBUGV("Skipped %sxml decl '%.*s'",
+                              is_decl ? "xml decl" : "xml proc inst" ,
+                              len, start);
+            return;
+        }
+        else if(cd_xml_match_token(ctx, CD_XML_TOKEN_EOF)) {
+            CD_XML_LOG_ERRORV("EOF while parsing %s",
+                              is_decl ? "xml decl" : "xml proc inst");
+            ctx->status = CD_XML_PREMATURE_EOF;
+            return;
+        }
+        else {
+            cd_xml_next_token(ctx);
+        }
+    }
+}
+
+static void cd_xml_parse_prolog(cd_xml_ctx_t* ctx)
+{
+    if(cd_xml_match_token(ctx, CD_XML_TOKEN_XML_DECL_START)) {
+        cd_xml_parse_xml_decl(ctx, true);
+    }
+    while(cd_xml_match_token(ctx, CD_XML_TOKEN_PROC_INSTR_START)) {
+        cd_xml_parse_xml_decl(ctx, false);
     }
 }
 
@@ -246,6 +295,11 @@ cd_xml_rv_t cd_xml_parse(cd_xml_doc_t* doc, const char* data, size_t size)
     };
     
     cd_xml_next_token(&ctx);
+    if(ctx.status != CD_XML_SUCCESS) return ctx.status;
+    
+    cd_xml_parse_prolog(&ctx);
+    if(ctx.status != CD_XML_SUCCESS) return ctx.status;
+
     while(ctx.status == CD_XML_SUCCESS && ctx.current.kind != CD_XML_TOKEN_EOF) {
         const char * kind = "ascii";
         switch (ctx.current.kind) {

@@ -1,22 +1,8 @@
-#include <stdio.h>
-#define CD_XML_LOG_ERROR(...) fprintf(stderr, __VA_ARGS__)
+#include "cd_xml.h"
 
-
-#include <stdint.h>
-#include <stdbool.h>
-
-
-
-typedef struct {
-    
-} cd_xml_doc_t;
-
-typedef enum
-{
-    CD_XML_SUCCESS = 0,
-    CD_XML_MALFORMED_UTF8,
-    CD_XML_PREMATURE_EOF
-} cd_xml_rv_t;
+#ifndef CD_XML_LOG_ERROR
+#define CD_XML_LOG_ERROR(...) do ; while(0)
+#endif
 
 typedef enum {
     CD_XML_TOKEN_EOF                    = 0,
@@ -25,8 +11,8 @@ typedef enum {
     CD_XML_TOKEN_LASTCHAR               = 127,
     CD_XML_TOKEN_UTF8,
     CD_XML_TOKEN_NAME,
-    CD_XML_TOKEN_EMPTYTAG_END,  // />
-    CD_XML_TOKEN_ENDTAG_START,               // </
+    CD_XML_TOKEN_EMPTYTAG_END,          // />
+    CD_XML_TOKEN_ENDTAG_START,          // </
     CD_XML_TOKEN_PROC_INSTR_START,      // <?
     CD_XML_TOKEN_PROC_INSTR_STOP,       // ?>
     CD_XML_TOKEN_XML_DECL_START         // <?xml
@@ -48,6 +34,7 @@ typedef struct {
 
     cd_xml_rv_t status;
 } cd_xml_ctx_t;
+
 
 static bool cd_xml_isspace(char c)
 {
@@ -281,27 +268,4 @@ cd_xml_rv_t cd_xml_parse(cd_xml_doc_t* doc, const char* data, size_t size)
         cd_xml_next_token(&ctx);
     }
     return ctx.status;
-}
-
-
-#include <stdio.h>
-#include <assert.h>
-#include <string.h>
-
-int main(int argc, const char * argv[]) {
-    
-    {
-        const char* xml =
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
-            "<foo>ᚠᚢᚦᚨᚱᚲ € æøå 𠜎</foo>";
-        cd_xml_doc_t doc;
-        cd_xml_rv_t rv = cd_xml_parse(&doc, xml, strlen(xml));
-        assert(rv == CD_XML_SUCCESS);
-        
-    }
-    
-    
-    // insert code here...
-    printf("Hello, World!\n");
-    return 0;
 }

@@ -10,6 +10,8 @@
 //#define CD_XML_LOG_ERROR(...) do ; while(0)
 //#endif
 
+#define CD_XML_STRINGVIEW_FORMAT(text) (int)(text.end-text.begin),text.begin
+
 typedef enum {
     CD_XML_TOKEN_EOF                    = 0,
     CD_XML_TOKEN_TAG_START              = '<',
@@ -25,15 +27,14 @@ typedef enum {
 } cd_xml_token_kind_t;
 
 typedef struct {
+    cd_xml_stringview_t text;
     cd_xml_token_kind_t kind;
-    const char* begin;
-    const char* end;
 } cd_xml_token_t;
 
 typedef struct {
     cd_xml_doc_t* doc;
+    cd_xml_stringview_t input;
     const char* ptr;
-    const char* end;
     
     cd_xml_token_t current;
     cd_xml_token_t matched;
@@ -79,12 +80,13 @@ static bool cd_xml_is_name_char(char c)
 
 static void cd_xml_next_token(cd_xml_ctx_t* ctx)
 {
+    if(ctx->status != CD_XML_SUCCESS) return;
     ctx->matched = ctx->current;
 
 restart:
-    ctx->current.begin = ctx->ptr;
-    ctx->current.end = ctx->ptr;
-    if(ctx->end <= ctx->ptr || *ctx->ptr == '\0') {
+    ctx->current.text.begin = ctx->ptr;
+    ctx->current.text.end = ctx->ptr;
+    if(ctx->input.end <= ctx->ptr || *ctx->ptr == '\0') {
         ctx->current.kind = CD_XML_TOKEN_EOF;
         return;
     }
@@ -99,21 +101,21 @@ restart:
         case '\r':
         case '\v':
         case '\f':
-            do { ctx->ptr++; } while(ctx->ptr < ctx->end && cd_xml_isspace(ctx->ptr[0]));
+            do { ctx->ptr++; } while(ctx->ptr < ctx->input.end && cd_xml_isspace(ctx->ptr[0]));
             goto restart;
             break;
         case '/':
             ctx->ptr++;
-            if(ctx->ptr < ctx->end && *ctx->ptr == '>') {
+            if(ctx->ptr < ctx->input.end && *ctx->ptr == '>') {
                 ctx->ptr++;
                 ctx->current.kind = CD_XML_TOKEN_EMPTYTAG_END;
             }
-            ctx->current.end = ctx->ptr;
+            ctx->current.text.end = ctx->ptr;
             break;
         case '<':
             ctx->current.kind = CD_XML_TOKEN_TAG_START;
             ctx->ptr++;
-            if(ctx->ptr < ctx->end) {
+            if(ctx->ptr < ctx->input.end) {
                 if(*ctx->ptr == '/') {
                     ctx->current.kind = CD_XML_TOKEN_ENDTAG_START;
                     ctx->ptr++;
@@ -121,7 +123,7 @@ restart:
                 else if(*ctx->ptr == '?') {
                     ctx->current.kind = CD_XML_TOKEN_PROC_INSTR_START;
                     ctx->ptr++;
-                    if(ctx->ptr + 2 < ctx->end &&
+                    if(ctx->ptr + 2 < ctx->input.end &&
                        ctx->ptr[0] == 'x' &&
                        ctx->ptr[1] == 'm' &&
                        ctx->ptr[2] == 'l') {
@@ -129,12 +131,12 @@ restart:
                         ctx->ptr += 3;
                     }
                 }
-                else if(ctx->ptr + 2 < ctx->end &&
+                else if(ctx->ptr + 2 < ctx->input.end &&
                         ctx->ptr[0] == '!' &&
                         ctx->ptr[1] == '-' &&
                         ctx->ptr[2] == '-') {   // xml comment
                     ctx->ptr += 3;
-                    for(; ctx->ptr + 2 < ctx->end && *ctx->ptr != '\0'; ctx->ptr++) {
+                    for(; ctx->ptr + 2 < ctx->input.end && *ctx->ptr != '\0'; ctx->ptr++) {
                         if(ctx->ptr[0] == '-' &&
                            ctx->ptr[1] == '-' &&
                            ctx->ptr[2] == '>') {
@@ -150,7 +152,7 @@ restart:
             break;
         case '?':
             ctx->ptr++;
-            if(ctx->ptr < ctx->end && *ctx->ptr == '>') {
+            if(ctx->ptr < ctx->input.end && *ctx->ptr == '>') {
                 ctx->current.kind = CD_XML_TOKEN_PROC_INSTR_STOP;
                 ctx->ptr++;
             }
@@ -168,17 +170,17 @@ restart:
         case '_':
             ctx->current.kind = CD_XML_TOKEN_NAME;
             ctx->ptr++;
-            do { ctx->ptr++; } while(ctx->ptr < ctx->end && cd_xml_is_name_char(ctx->ptr[0]));
+            do { ctx->ptr++; } while(ctx->ptr < ctx->input.end && cd_xml_is_name_char(ctx->ptr[0]));
             break;
         default:
             ctx->ptr++;
             break;
         }
-        ctx->current.end = ctx->ptr;
+        ctx->current.text.end = ctx->ptr;
     }
     else if ((*ctx->ptr & 0xe0) == 0xc0) {
         // 2-byte UTF-8
-        if(ctx->end <= ctx->ptr + 1 || ctx->ptr[1] == '\0') {
+        if(ctx->input.end <= ctx->ptr + 1 || ctx->ptr[1] == '\0') {
             CD_XML_LOG_ERROR("2-byte UTF-8 span past end of data");
             ctx->current.kind = CD_XML_TOKEN_EOF;
             ctx->status = CD_XML_MALFORMED_UTF8;
@@ -191,12 +193,12 @@ restart:
             return;
         }
         ctx->ptr += 2;
-        ctx->current.end = ctx->ptr;
+        ctx->current.text.end = ctx->ptr;
         ctx->current.kind = CD_XML_TOKEN_UTF8;
     }
     else if ((*ctx->ptr & 0xf0) == 0xe0) {
         //  3-byte UTF-8
-        if(ctx->end <= ctx->ptr + 2) {
+        if(ctx->input.end <= ctx->ptr + 2) {
             CD_XML_LOG_ERROR("3-byte UTF-8 span past end of data");
             ctx->current.kind = CD_XML_TOKEN_EOF;
             ctx->status = CD_XML_MALFORMED_UTF8;
@@ -211,12 +213,12 @@ restart:
             }
         }
         ctx->ptr += 3;
-        ctx->current.end = ctx->ptr;
+        ctx->current.text.end = ctx->ptr;
         ctx->current.kind = CD_XML_TOKEN_UTF8;
     }
     else if ((*ctx->ptr & 0xf8) == 0xf0) {
         // 4-byte UTF-8
-        if(ctx->end <= ctx->ptr + 3) {
+        if(ctx->input.end <= ctx->ptr + 3) {
             CD_XML_LOG_ERROR("3-byte UTF-8 span past end of data");
             ctx->current.kind = CD_XML_TOKEN_EOF;
             ctx->status = CD_XML_MALFORMED_UTF8;
@@ -231,7 +233,7 @@ restart:
             }
         }
         ctx->ptr += 4;
-        ctx->current.end = ctx->ptr;
+        ctx->current.text.end = ctx->ptr;
         ctx->current.kind = CD_XML_TOKEN_UTF8;
     }
     else {
@@ -244,23 +246,35 @@ restart:
 
 static bool cd_xml_match_token(cd_xml_ctx_t* ctx, cd_xml_token_kind_t token_kind)
 {
-    if(ctx->current.kind == token_kind) {
+    if(ctx->status == CD_XML_SUCCESS && ctx->current.kind == token_kind) {
         cd_xml_next_token(ctx);
         return true;
     }
     return false;
 }
 
+static bool cd_xml_expect_token(cd_xml_ctx_t* ctx, cd_xml_token_kind_t token_kind, const char* msg)
+{
+    if(ctx->status != CD_XML_SUCCESS) return false;
+    if(ctx->current.kind == token_kind) {
+        cd_xml_next_token(ctx);
+        return ctx->status == CD_XML_SUCCESS;
+    }
+    ctx->status = CD_XML_STATUS_UNEXPECTED_TOKEN;
+    CD_XML_LOG_ERRORV("%s, got %.*s", msg, CD_XML_STRINGVIEW_FORMAT(ctx->current.text));
+    return false;
+}
+
 static void cd_xml_parse_xml_decl(cd_xml_ctx_t* ctx, bool is_decl)
 {
     assert(ctx->matched.kind == is_decl ? CD_XML_TOKEN_XML_DECL_START : CD_XML_TOKEN_PROC_INSTR_START);
-    const char* start = ctx->matched.begin;
+    cd_xml_stringview_t match = { .begin = ctx->matched.text.begin };
     while(ctx->status == CD_XML_SUCCESS) {
         if(cd_xml_match_token(ctx, CD_XML_TOKEN_PROC_INSTR_STOP)) {
-            int len = (int)(ctx->matched.end - start);
-            CD_XML_LOG_DEBUGV("Skipped %sxml decl '%.*s'",
-                              is_decl ? "xml decl" : "xml proc inst" ,
-                              len, start);
+            match.end = ctx->matched.text.end;
+            CD_XML_LOG_DEBUGV("Skipped %s '%.*s'",
+                              is_decl ? "xml decl" : "xml proc inst",
+                              CD_XML_STRINGVIEW_FORMAT(match));
             return;
         }
         else if(cd_xml_match_token(ctx, CD_XML_TOKEN_EOF)) {
@@ -285,12 +299,24 @@ static void cd_xml_parse_prolog(cd_xml_ctx_t* ctx)
     }
 }
 
+static bool cd_xml_parse_element(cd_xml_ctx_t* ctx)
+{
+    if(!cd_xml_expect_token(ctx, CD_XML_TOKEN_NAME, "Expected element name")) return false;
+
+    
+    
+    return true;
+}
+
 cd_xml_rv_t cd_xml_parse(cd_xml_doc_t* doc, const char* data, size_t size)
 {
     cd_xml_ctx_t ctx = {
         .doc = doc,
+        .input = {
+            .begin = data,
+            .end = data + size
+        },
         .ptr = data,
-        .end = data + size,
         .status = CD_XML_SUCCESS
     };
     
@@ -300,6 +326,9 @@ cd_xml_rv_t cd_xml_parse(cd_xml_doc_t* doc, const char* data, size_t size)
     cd_xml_parse_prolog(&ctx);
     if(ctx.status != CD_XML_SUCCESS) return ctx.status;
 
+    if(cd_xml_expect_token(&ctx, CD_XML_TOKEN_TAG_START, "Expected element start '<'")) {
+        cd_xml_parse_element(&ctx);
+    }
     while(ctx.status == CD_XML_SUCCESS && ctx.current.kind != CD_XML_TOKEN_EOF) {
         const char * kind = "ascii";
         switch (ctx.current.kind) {
@@ -316,9 +345,9 @@ cd_xml_rv_t cd_xml_parse(cd_xml_doc_t* doc, const char* data, size_t size)
             break;
         }
         fprintf(stderr, "Token '%.*s' %s %zu bytes\n",
-                (int)(ctx.current.end-ctx.current.begin), ctx.current.begin,
+                CD_XML_STRINGVIEW_FORMAT(ctx.current.text),
                 kind,
-                ctx.current.end-ctx.current.begin);
+                ctx.current.text.end-ctx.current.text.begin);
         cd_xml_next_token(&ctx);
     }
     return ctx.status;

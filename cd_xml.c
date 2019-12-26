@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <assert.h>
 #include "cd_xml.h"
 
@@ -299,7 +300,7 @@ static cd_xml_stringview_t cd_xml_decode_entities(cd_xml_ctx_t* ctx, cd_xml_stri
 {
     if(amps == 0) return in;
   
-    size_t size = in.end - in.begin;
+    ptrdiff_t size = in.end - in.begin;
     cd_xml_buf_t* buf = (cd_xml_buf_t*)CD_XML_MALLOC(sizeof(cd_xml_buf_t) + size);
     buf->next = ctx->bufs;
     ctx->bufs = buf;

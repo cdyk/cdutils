@@ -10,15 +10,15 @@ typedef struct {
 } cd_xml_stringview_t;
 
 typedef struct {
-    
+  char dummy;
 } cd_xml_attribute_t;
 
 typedef struct {
-    
+  char dummy;
 } cd_xml_element_t;
 
 typedef struct {
-    
+  char dummy;
 } cd_xml_doc_t;
 
 typedef enum

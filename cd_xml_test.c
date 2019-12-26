@@ -2,15 +2,11 @@
 
 #include "cd_xml.h"
 
-
-
-
 #include <stdio.h>
 #include <assert.h>
 #include <string.h>
 
 int main(int argc, const char * argv[]) {
-    
     {   // Misc UTF-tests
         const char* xml =
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!--m oo-->"

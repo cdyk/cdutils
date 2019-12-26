@@ -10,6 +10,10 @@
 //#define CD_XML_LOG_ERROR(...) do ; while(0)
 //#endif
 
+#define CD_XML_MALLOC(size) malloc(size)
+#define CD_XML_FREE(size) free(size)
+#define CD_XML_REALLOC(ptr,size) realloc(ptr,size)
+
 #define CD_XML_STRINGVIEW_FORMAT(text) (int)(text.end-text.begin),text.begin
 
 typedef enum {
@@ -36,6 +40,11 @@ typedef struct {
     cd_xml_token_kind_t kind;
 } cd_xml_token_t;
 
+typedef struct cd_xml_buf_struct {
+    struct cd_xml_buf_struct* next;
+    char payload[0];
+} cd_xml_buf_t;
+
 typedef struct {
     cd_xml_stringview_t text;
     uint32_t code;
@@ -49,8 +58,22 @@ typedef struct {
     cd_xml_token_t current;
     cd_xml_token_t matched;
 
+    cd_xml_buf_t* bufs;
     cd_xml_rv_t status;
 } cd_xml_ctx_t;
+
+static cd_xml_stringview_t cd_xml_stringview(const char* str)
+{
+    cd_xml_stringview_t rv = {
+        .begin = str,
+        .end = str
+    };
+    while(*rv.end != '\0') { rv.end++; }
+    return rv;
+}
+
+
+
 
 static bool cd_xml_isspace(uint32_t c)
 {
@@ -266,10 +289,91 @@ static bool cd_xml_expect_token(cd_xml_ctx_t* ctx, cd_xml_token_kind_t token_kin
     return false;
 }
 
-static cd_xml_stringview_t cd_xml_decode_entities(cd_xml_stringview_t in, unsigned amps)
+static cd_xml_stringview_t cd_xml_decode_entities(cd_xml_ctx_t* ctx, cd_xml_stringview_t in, unsigned amps)
 {
-    // TODO: actually decode entities
-    return in;
+    if(amps == 0) return in;
+  
+    size_t size = in.end - in.begin;
+    cd_xml_buf_t* buf = (cd_xml_buf_t*)CD_XML_MALLOC(sizeof(cd_xml_buf_t) + size);
+    buf->next = ctx->bufs;
+    ctx->bufs = buf;
+    
+    
+    const cd_xml_stringview_t cd_xml_str_quot = cd_xml_stringview("quot");
+    const cd_xml_stringview_t cd_xml_str_amp  = cd_xml_stringview("amp");
+    const cd_xml_stringview_t cd_xml_str_apos = cd_xml_stringview("apos");
+    const cd_xml_stringview_t cd_xml_str_lt   = cd_xml_stringview("lt");
+    const cd_xml_stringview_t cd_xml_str_gt   = cd_xml_stringview("gt");
+
+    char* begin = buf->payload;
+    char* end = begin;
+    while(in.begin < in.end) {
+        if(*in.begin == '&') {
+            in.begin++;
+            if(in.begin < in.end && *in.begin == '#') {
+                uint32_t code = 0;
+                if(in.begin < in.end && *in.begin == 'x') { // hex-code entity
+                    while(in.begin < in.end && *in.begin != ';') {
+                        unsigned c = (unsigned char)*in.begin++;
+                        code = code << 4;
+                        if(('0' <= c) && (c <= '9')) {
+                            code += c - '0';
+                        }
+                        else if(('a' <= c) && (c <= 'f')) {
+                            code += c - 'a' + 10;
+                        }
+                        else if(('A' <= c) && (c <= 'F')) {
+                            code += c - 'A' + 10;
+                        }
+                        else {
+                            CD_XML_LOG_ERRORV("Illegal hexidecimal digit %c in entity", c);
+                            ctx->status = CD_XML_MALFORMED_ENTITY;
+                            cd_xml_stringview_t rv = { NULL, NULL };
+                            return rv;
+                        }
+                    }
+                }
+                else {  // decimal code entity
+                    while(in.begin < in.end && *in.begin != ';') {
+                        unsigned c = (unsigned char)*in.begin++;
+                        code = 10u * code;
+                        if(('0' <= c) && (c <= '9')) {
+                            code += c - '0';
+                        }
+                        else {
+                            CD_XML_LOG_ERRORV("Illegal decimal digit %c in entity", c);
+                            ctx->status = CD_XML_MALFORMED_ENTITY;
+                            cd_xml_stringview_t rv = { NULL, NULL };
+                            return rv;
+                        }
+                    }
+                }
+                // Produce UTF-8 of code
+            }
+            else {  // named entity
+                cd_xml_stringview_t e = { .begin = in.begin };
+                while(in.begin < in.end && *in.begin != ';') { in.begin++; }
+                e.end = in.begin;
+                
+                CD_XML_LOG_DEBUGV("Named entity '%.*s'", CD_XML_STRINGVIEW_FORMAT(e));
+            }
+            
+            if(*in.begin == *in.end || *in.begin != ';') {
+                CD_XML_LOG_ERROR("Failed to find terminating ; of entity");
+                ctx->status = CD_XML_MALFORMED_ENTITY;
+                cd_xml_stringview_t rv = { NULL, NULL };
+                return rv;
+            }
+            in.begin++;
+        }
+        else {
+            assert(end - begin < size);
+            *end++ = *in.begin++;
+        }
+    }
+    
+    cd_xml_stringview_t rv = { .begin = begin, .end = end };
+    return rv;
 }
 
 static cd_xml_stringview_t cd_xml_parse_attribute_value(cd_xml_ctx_t* ctx)
@@ -294,7 +398,7 @@ static cd_xml_stringview_t cd_xml_parse_attribute_value(cd_xml_ctx_t* ctx)
     rv.end = ctx->chr.text.begin;
     cd_xml_next_char(ctx);
     cd_xml_next_token(ctx);
-    return cd_xml_decode_entities(rv, amps);
+    return cd_xml_decode_entities(ctx, rv, amps);
 }
 
 
@@ -407,7 +511,7 @@ static cd_xml_element_t* cd_xml_parse_element(cd_xml_ctx_t* ctx)
                 if(!cd_xml_expect_token(ctx, CD_XML_TOKEN_NAME, "In end-tag, expected name")) return NULL;
                 if(!cd_xml_expect_token(ctx, CD_XML_TOKEN_TAG_END, "In end-tag, expected >")) return NULL;
                 if(text.begin != NULL) {
-                    text = cd_xml_decode_entities(text, amps);
+                    text = cd_xml_decode_entities(ctx, text, amps);
                     CD_XML_LOG_DEBUGV("Text '%.*s'", CD_XML_STRINGVIEW_FORMAT(text));
                     text.begin = NULL;
                 }
@@ -415,7 +519,7 @@ static cd_xml_element_t* cd_xml_parse_element(cd_xml_ctx_t* ctx)
             }
             else if(cd_xml_match_token(ctx, CD_XML_TOKEN_TAG_START)) {
                 if(text.begin != NULL) {
-                    text = cd_xml_decode_entities(text, amps);
+                    text = cd_xml_decode_entities(ctx, text, amps);
                     CD_XML_LOG_DEBUGV("Text '%.*s'", CD_XML_STRINGVIEW_FORMAT(text));
                     text.begin = NULL;
                 }
@@ -466,6 +570,7 @@ cd_xml_rv_t cd_xml_parse(cd_xml_doc_t* doc, const char* data, size_t size)
                 .end = data
             }
         },
+        .bufs = NULL,
         .status = CD_XML_SUCCESS
     };
     

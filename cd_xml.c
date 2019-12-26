@@ -15,6 +15,7 @@
 typedef enum {
     CD_XML_TOKEN_EOF                    = 0,
     CD_XML_TOKEN_QUOTE                  = '"',  // 34
+    CD_XML_TOKEN_AMP                    = '&',  // 38
     CD_XML_TOKEN_APOSTROPHE             = '\'', // 39
     CD_XML_TOKEN_COLON                  = ':',  // 58
     CD_XML_TOKEN_TAG_START              = '<',  // 60
@@ -265,6 +266,12 @@ static bool cd_xml_expect_token(cd_xml_ctx_t* ctx, cd_xml_token_kind_t token_kin
     return false;
 }
 
+static cd_xml_stringview_t cd_xml_decode_entities(cd_xml_stringview_t in, unsigned amps)
+{
+    // TODO: actually decode entities
+    return in;
+}
+
 static cd_xml_stringview_t cd_xml_parse_attribute_value(cd_xml_ctx_t* ctx)
 {
     cd_xml_token_kind_t delimiter = ctx->current.kind;
@@ -273,8 +280,10 @@ static cd_xml_stringview_t cd_xml_parse_attribute_value(cd_xml_ctx_t* ctx)
         ctx->status = CD_XML_STATUS_UNEXPECTED_TOKEN;
         return ctx->current.text;
     }
+    unsigned amps = 0;
     cd_xml_stringview_t rv = ctx->chr.text;
     while(ctx->chr.code && (ctx->chr.code != delimiter)) {
+        if(ctx->chr.code == '&') { amps++; }
         cd_xml_next_char(ctx);
     }
     if(ctx->chr.code == '\0') {
@@ -285,7 +294,7 @@ static cd_xml_stringview_t cd_xml_parse_attribute_value(cd_xml_ctx_t* ctx)
     rv.end = ctx->chr.text.begin;
     cd_xml_next_char(ctx);
     cd_xml_next_token(ctx);
-    return rv;
+    return cd_xml_decode_entities(rv, amps);
 }
 
 
@@ -391,15 +400,25 @@ static cd_xml_element_t* cd_xml_parse_element(cd_xml_ctx_t* ctx)
         return NULL;
     }
     else if(cd_xml_match_token(ctx, CD_XML_TOKEN_TAG_END)) {
-        
-        const char* begin = ctx->current.text.begin;
+        unsigned amps = 0;
+        cd_xml_stringview_t text = { NULL, NULL};
         while(ctx->status == CD_XML_SUCCESS) {
             if(cd_xml_match_token(ctx, CD_XML_TOKEN_ENDTAG_START)) {
                 if(!cd_xml_expect_token(ctx, CD_XML_TOKEN_NAME, "In end-tag, expected name")) return NULL;
                 if(!cd_xml_expect_token(ctx, CD_XML_TOKEN_TAG_END, "In end-tag, expected >")) return NULL;
+                if(text.begin != NULL) {
+                    text = cd_xml_decode_entities(text, amps);
+                    CD_XML_LOG_DEBUGV("Text '%.*s'", CD_XML_STRINGVIEW_FORMAT(text));
+                    text.begin = NULL;
+                }
                 break;
             }
             else if(cd_xml_match_token(ctx, CD_XML_TOKEN_TAG_START)) {
+                if(text.begin != NULL) {
+                    text = cd_xml_decode_entities(text, amps);
+                    CD_XML_LOG_DEBUGV("Text '%.*s'", CD_XML_STRINGVIEW_FORMAT(text));
+                    text.begin = NULL;
+                }
                 cd_xml_element_t* child = cd_xml_parse_element(ctx);
                 if(ctx->status != CD_XML_SUCCESS) return NULL;
             }
@@ -411,6 +430,13 @@ static cd_xml_element_t* cd_xml_parse_element(cd_xml_ctx_t* ctx)
                 return NULL;
             }
             else {
+                if(ctx->current.kind == CD_XML_TOKEN_AMP) {
+                    amps++;
+                }
+                if(text.begin == NULL) {
+                    text.begin = ctx->current.text.begin;
+                }
+                text.end = ctx->current.text.end;
                 cd_xml_next_token(ctx);
             }
         }

@@ -467,7 +467,35 @@ static void cd_xml_parse_xml_decl(cd_xml_ctx_t* ctx, bool is_decl)
             cd_xml_stringview_t name = ctx->matched.text;
             if(!cd_xml_expect_token(ctx, CD_XML_TOKEN_EQUAL, "Expected '='")) return;
             cd_xml_stringview_t value = cd_xml_parse_attribute_value(ctx);
-            CD_XML_LOG_DEBUGV("Attribute '%.*s'='%.*s'",
+
+            if(is_decl) {
+
+                if(cd_xml_strcmp(name, cd_xml_stringview("version"))) {
+                    if(cd_xml_strcmp(value, cd_xml_stringview("1.0"))) { }
+                    else {
+                        CD_XML_LOG_ERRORV("Unsupported xml version %.*s", CD_XML_STRINGVIEW_FORMAT(value));
+                        ctx->status = CD_XML_STATUS_UNSUPPORTED_VERSION;
+                        return;
+                    }
+                }
+                else if(cd_xml_strcmp(name, cd_xml_stringview("encoding"))) {
+                    if(cd_xml_strcmp(value, cd_xml_stringview("ASCII"))) { }
+                    if(cd_xml_strcmp(value, cd_xml_stringview("UTF-8"))) { }
+                    else {
+                        CD_XML_LOG_ERRORV("Unsupported encoding %.*s", CD_XML_STRINGVIEW_FORMAT(value));
+                        ctx->status = CD_XML_STATUS_UNSUPPORTED_ENCODING;
+                        return;
+                    }
+                }
+                else if(cd_xml_strcmp(name, cd_xml_stringview("standalone"))) { /* ignore for now */ }
+                else {
+                    CD_XML_LOG_ERRORV("Unrecognized declaration attribute '%.*s'='%.*s'",
+                                      CD_XML_STRINGVIEW_FORMAT(name),
+                                      CD_XML_STRINGVIEW_FORMAT(value));
+                }
+            }
+
+            CD_XML_LOG_DEBUGV("zAttribute '%.*s'='%.*s'",
                               CD_XML_STRINGVIEW_FORMAT(name),
                               CD_XML_STRINGVIEW_FORMAT(value));
         }
@@ -639,34 +667,6 @@ cd_xml_rv_t cd_xml_parse(cd_xml_doc_t* doc, const char* data, size_t size)
     if(cd_xml_expect_token(&ctx, CD_XML_TOKEN_TAG_START, "Expected element start '<'")) {
         cd_xml_parse_element(&ctx);
     }
-    while(ctx.status == CD_XML_SUCCESS && ctx.current.kind != CD_XML_TOKEN_EOF) {
-        const char * kind = NULL;
-        switch (ctx.current.kind) {
-        case CD_XML_TOKEN_TAG_START:        kind = "TAG_START"; break;
-        case CD_XML_TOKEN_TAG_END:          kind = "TAG_END"; break;
-        case CD_XML_TOKEN_UTF8:             kind = "UTF-8"; break;
-        case CD_XML_TOKEN_NAME:             kind = "TOKEN_NAME"; break;
-        case CD_XML_TOKEN_EMPTYTAG_END:     kind = "EMPTYTAG_END"; break;
-        case CD_XML_TOKEN_ENDTAG_START:     kind = "ENDTAG_START"; break;
-        case CD_XML_TOKEN_PROC_INSTR_START: kind = "PROC_INSTR_START"; break;
-        case CD_XML_TOKEN_PROC_INSTR_STOP:  kind = "PROC_INSTR_STOP"; break;
-        case CD_XML_TOKEN_XML_DECL_START:   kind = "DECL_START"; break;
-        default:
-            break;
-        }
-        if(kind) {
-            fprintf(stderr, "Token '%.*s' %s %zu bytes\n",
-                    CD_XML_STRINGVIEW_FORMAT(ctx.current.text),
-                    kind,
-                    ctx.current.text.end-ctx.current.text.begin);
-        }
-        else {
-            fprintf(stderr, "Token '%.*s' %zu bytes, code=%x\n",
-                    CD_XML_STRINGVIEW_FORMAT(ctx.current.text),
-                    ctx.current.text.end-ctx.current.text.begin,
-                    (unsigned)ctx.current.kind);
-        }
-        cd_xml_next_token(&ctx);
-    }
+    cd_xml_expect_token(&ctx, CD_XML_TOKEN_EOF, "Expexted EOF");
     return ctx.status;
 }

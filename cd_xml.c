@@ -72,8 +72,14 @@ static cd_xml_stringview_t cd_xml_stringview(const char* str)
     return rv;
 }
 
-
-
+static bool cd_xml_strcmp(cd_xml_stringview_t a, cd_xml_stringview_t b)
+{
+    if( (a.end - a.begin) != (b.end - b.begin)) return false;
+    for(const char *p=a.begin, *q=b.begin; p<a.end; p++,q++) {
+        if(*p != *q) return false;
+    }
+    return true;
+}
 
 static bool cd_xml_isspace(uint32_t c)
 {
@@ -299,20 +305,16 @@ static cd_xml_stringview_t cd_xml_decode_entities(cd_xml_ctx_t* ctx, cd_xml_stri
     ctx->bufs = buf;
     
     
-    const cd_xml_stringview_t cd_xml_str_quot = cd_xml_stringview("quot");
-    const cd_xml_stringview_t cd_xml_str_amp  = cd_xml_stringview("amp");
-    const cd_xml_stringview_t cd_xml_str_apos = cd_xml_stringview("apos");
-    const cd_xml_stringview_t cd_xml_str_lt   = cd_xml_stringview("lt");
-    const cd_xml_stringview_t cd_xml_str_gt   = cd_xml_stringview("gt");
-
     char* begin = buf->payload;
     char* end = begin;
     while(in.begin < in.end) {
         if(*in.begin == '&') {
             in.begin++;
             if(in.begin < in.end && *in.begin == '#') {
+                in.begin++;
                 uint32_t code = 0;
                 if(in.begin < in.end && *in.begin == 'x') { // hex-code entity
+                    in.begin++;
                     while(in.begin < in.end && *in.begin != ';') {
                         unsigned c = (unsigned char)*in.begin++;
                         code = code << 4;
@@ -349,13 +351,66 @@ static cd_xml_stringview_t cd_xml_decode_entities(cd_xml_ctx_t* ctx, cd_xml_stri
                     }
                 }
                 // Produce UTF-8 of code
+                if(code <= 0x7f) {
+                    assert(end - begin < size);
+                    *end++ = code;
+                }
+                else if(code <= 0x7ff) {
+                    assert(end - begin + 1 < size);
+                    *end++ = (code >> 6  ) | 0xc0;
+                    *end++ = (code & 0x3f) | 0x80;
+                }
+                else if(code <= 0xffff) {
+                    assert(end - begin + 2 < size);
+                    *end++ = ( code >> 12        ) | 0xe0;
+                    *end++ = ((code >>  6) & 0x3f) | 0x80;
+                    *end++ = ( code        & 0x3f) | 0x80;
+                }
+                else if(code <= 0x10ffff) {
+                    assert(end - begin + 3 < size);
+                    *end++ = ( code >> 18        ) | 0xf0;
+                    *end++ = ((code >> 12) & 0x3f) | 0x80;
+                    *end++ = ((code >>  6) & 0x3f) | 0x80;
+                    *end++ = ( code        & 0x3f) | 0x80;
+                }
+                else {
+                    CD_XML_LOG_ERRORV("Entity code %x too large for UTF-8 encoding", code);
+                    ctx->status = CD_XML_MALFORMED_ENTITY;
+                    cd_xml_stringview_t rv = { NULL, NULL };
+                    return rv;
+                }
             }
             else {  // named entity
                 cd_xml_stringview_t e = { .begin = in.begin };
                 while(in.begin < in.end && *in.begin != ';') { in.begin++; }
                 e.end = in.begin;
-                
-                CD_XML_LOG_DEBUGV("Named entity '%.*s'", CD_XML_STRINGVIEW_FORMAT(e));
+
+                if(cd_xml_strcmp(e, cd_xml_stringview("quot"))) {
+                    assert(end - begin < size);
+                    *end++ = '"';
+                }
+                else if(cd_xml_strcmp(e, cd_xml_stringview("amp"))) {
+                    assert(end - begin < size);
+                    *end++ = '&';
+                }
+                else if(cd_xml_strcmp(e, cd_xml_stringview("apos"))) {
+                    assert(end - begin < size);
+                    *end++ = '\'';
+                }
+                else if(cd_xml_strcmp(e, cd_xml_stringview("lt"))) {
+                    assert(end - begin < size);
+                    *end++ = '<';
+                }
+                else if(cd_xml_strcmp(e, cd_xml_stringview("gt"))) {
+                    assert(end - begin < size);
+                    *end++ = '>';
+                }
+                else {
+                    CD_XML_LOG_ERRORV("Unrecognized named entity '%.*s'", CD_XML_STRINGVIEW_FORMAT(e));
+                    ctx->status = CD_XML_MALFORMED_ENTITY;
+                    cd_xml_stringview_t rv = { NULL, NULL };
+                    return rv;
+                }
             }
             
             if(*in.begin == *in.end || *in.begin != ';') {

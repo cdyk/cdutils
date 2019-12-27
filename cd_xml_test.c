@@ -12,8 +12,8 @@ int main(int argc, const char * argv[]) {
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!--m oo-->"
             "<foo moo=' doo  '><gah quux='waldo&lt;&#x5d0;'>   ᚠᚢᚦ&amp;ᚨᚱᚲ €  <meep/> æøå 𠜎  </gah><meh>meh</meh></foo>";
         cd_xml_doc_t doc;
-        cd_xml_rv_t rv = cd_xml_parse(&doc, xml, strlen(xml));
-        assert(rv == CD_XML_SUCCESS);
+        cd_xml_status_t rv = cd_xml_init_and_parse(&doc, xml, strlen(xml));
+        assert(rv == CD_XML_STATUS_SUCCESS);
     }
     {   // Namespaces
         const char* xml =
@@ -26,8 +26,8 @@ int main(int argc, const char * argv[]) {
             "  </bar>\n"
             "</foo>\n";
         cd_xml_doc_t doc;
-        cd_xml_rv_t rv = cd_xml_parse(&doc, xml, strlen(xml));
-        assert(rv == CD_XML_SUCCESS);
+        cd_xml_status_t rv = cd_xml_init_and_parse(&doc, xml, strlen(xml));
+        assert(rv == CD_XML_STATUS_SUCCESS);
     }
 
     return 0;

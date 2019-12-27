@@ -48,6 +48,11 @@ typedef enum
 
 void cd_xml_init(cd_xml_doc_t* doc);
 void cd_xml_release(cd_xml_doc_t* doc);
+cd_xml_att_ix_t cd_xml_add_namespace(cd_xml_doc_t* doc,
+cd_xml_stringview_t* prefix,
+                              cd_xml_stringview_t* uri);
+
+
 cd_xml_status_t cd_xml_init_and_parse(cd_xml_doc_t* doc, const char* data, size_t size);
 
 #endif // CD_XML_H

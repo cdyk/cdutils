@@ -9,7 +9,7 @@
 #define CD_XML_FREE(size) free(size)
 #define CD_XML_REALLOC(ptr,size) realloc(ptr,size)
 
-#define CD_XML_STRINGVIEW_FORMAT(text) (int)(text.end-text.begin),text.begin
+#define CD_XML_STRINGVIEW_FORMAT(text) (int)((text).end-(text).begin),(text).begin
 
 typedef enum {
     CD_XML_TOKEN_EOF                    = 0,
@@ -46,6 +46,17 @@ typedef struct {
 } cd_xml_chr_state_t;
 
 typedef struct {
+    cd_xml_stringview_t ns;
+    cd_xml_stringview_t name;
+    cd_xml_stringview_t value;
+} cd_xml_att_triple_t;
+
+typedef struct {
+    cd_xml_stringview_t prefix;
+    cd_xml_ns_ix_t ns;
+} cd_xml_ns_bind_t;
+
+typedef struct {
     cd_xml_doc_t* doc;
     cd_xml_stringview_t input;
     cd_xml_chr_state_t chr;
@@ -53,6 +64,11 @@ typedef struct {
     cd_xml_token_t current;
     cd_xml_token_t matched;
 
+    cd_xml_att_triple_t* tmp_atts;
+    
+    cd_xml_ns_ix_t ns_default;
+    cd_xml_ns_bind_t* ns_bind_stack;
+    
     cd_xml_buf_t* bufs;
     unsigned depth;
 
@@ -75,6 +91,8 @@ typedef struct {
 #define cd_xml_sb_free(a) ((a)?CD_XML_FREE(cd_xml__sb_base(a):0)
 #define cd_xml_sb_size(a) ((a)?cd_xml__sb_size(a):0u)
 #define cd_xml_sb_push(a,x) (cd_xml__sb_maybe_grow(a),(a)[cd_xml__sb_size(a)++]=(x))
+
+#define cd_xml_sb_shrink(a,n) ((a)&&((n)<cd_xml__sb_size(a))?cd_xml__sb_size(a)=(n):0)
 
 static void* cd_xml__sb_grow(void* ptr, size_t item_size)
 {
@@ -526,31 +544,6 @@ static bool cd_xml_parse_attribute_value(cd_xml_ctx_t* ctx, cd_xml_stringview_t*
     return false;
 }
 
-static unsigned cd_xml_add_namespace(cd_xml_doc_t* doc,
-                                     cd_xml_stringview_t* prefix,
-                                     cd_xml_stringview_t* uri)
-{
-    assert(uri->begin < uri->end && "URI cannot be empty");
-
-    // Assume that number of namespaces are quite low, so
-    // a linear search will do for now.
-    for(unsigned i=0; i<cd_xml_sb_size(doc->ns); i++) {
-        if(cd_xml_strvcmp(&doc->ns[i].uri, uri)) {
-            // Match
-            if(doc->ns[i].prefix.begin == NULL && prefix->begin != NULL) {
-                // Add prefix to previously defined default namespace
-                doc->ns[i].prefix = *prefix;
-            }
-            return i;
-        }
-    }
-    // Register new namespace
-    unsigned ix = cd_xml_sb_size(doc->ns);
-    cd_xml_ns_t x = {*prefix, *uri};
-    cd_xml_sb_push(doc->ns, x);
-    return ix;
-}
-
 static bool cd_xml_parse_xml_decl(cd_xml_ctx_t* ctx, bool is_decl)
 {
     assert(ctx->matched.kind == is_decl ? CD_XML_TOKEN_XML_DECL_START : CD_XML_TOKEN_PROC_INSTR_START);
@@ -632,7 +625,7 @@ static bool cd_xml_parse_prolog(cd_xml_ctx_t* ctx)
     return true;
 }
 
-static bool cd_xml_parse_attribute(cd_xml_element_t* element, cd_xml_ctx_t* ctx)
+static bool cd_xml_parse_attribute(cd_xml_ctx_t* ctx)
 {
     assert(ctx->matched.kind == CD_XML_TOKEN_NAME);
 
@@ -686,107 +679,171 @@ static bool cd_xml_parse_attribute(cd_xml_element_t* element, cd_xml_ctx_t* ctx)
         return ns != cd_xml_no_ix;
     }
     
-    
-    cd_xml_report_debug(ctx, "Attribute %.*s:%.*s='%.*s'",
-                        CD_XML_STRINGVIEW_FORMAT(ns),
-                        CD_XML_STRINGVIEW_FORMAT(name),
-                        CD_XML_STRINGVIEW_FORMAT(value));
+    cd_xml_att_triple_t att = {
+        .ns = ns,
+        .name = name,
+        .value = value
+    };
+    cd_xml_sb_push(ctx->tmp_atts, att);
     return true;
 }
 
-static cd_xml_element_t* cd_xml_parse_element(cd_xml_ctx_t* ctx)
+static bool cd_xml_parse_element_tag_start(cd_xml_ctx_t* ctx, cd_xml_stringview_t* ns, cd_xml_stringview_t* name)
 {
-    const char* tag_start = ctx->matched.text.begin;
     assert(ctx->matched.kind == CD_XML_TOKEN_TAG_START);
-    if(!cd_xml_expect_token(ctx, CD_XML_TOKEN_NAME, "Expected element name")) return NULL;
+    if(!cd_xml_expect_token(ctx, CD_XML_TOKEN_NAME, "Expected element name")) return false;
 
-    cd_xml_stringview_t ns = { NULL, NULL };
-    cd_xml_stringview_t name = ctx->matched.text;
+    ns->begin = NULL;
+    ns->end = NULL;
+    *name = ctx->matched.text;
     if(cd_xml_match_token(ctx, CD_XML_TOKEN_COLON)) {
         if (!cd_xml_match_token(ctx, CD_XML_TOKEN_NAME)) {
             ctx->status = CD_XML_STATUS_UNEXPECTED_TOKEN;
-            cd_xml_report_error(ctx, name.begin, ctx->matched.text.end, "Expected element name after ':'");
-            return NULL;
+            cd_xml_report_error(ctx, name->begin, ctx->matched.text.end, "Expected element name after ':'");
+            return false;
         }
-        ns = name;
-        name = ctx->matched.text;
+        *ns = *name;
+        *name = ctx->matched.text;
     }
 
-    cd_xml_report_debug(ctx, "> Element %.*s:%.*s",
-                        CD_XML_STRINGVIEW_FORMAT(ns),
-                        CD_XML_STRINGVIEW_FORMAT(name));
-
-    cd_xml_element_t* element = NULL;
-
+    // parse attributes
+    // get all namespaces defines before we start to resolve stuff
     while(cd_xml_match_token(ctx, CD_XML_TOKEN_NAME)) {
-        if (!cd_xml_parse_attribute(element, ctx)) return NULL;
-   }
+        if (!cd_xml_parse_attribute(ctx)) return false;
+    }
 
+    return true;
+}
+
+static bool cd_xml_parse_element(cd_xml_ctx_t* ctx);
+
+static bool cd_xml_parse_element_contents(cd_xml_ctx_t* ctx, cd_xml_stringview_t* ns, cd_xml_stringview_t* name)
+{
     if(cd_xml_match_token(ctx, CD_XML_TOKEN_EMPTYTAG_END)) {
+        // Leaf tag
+        return true;
+    }
+
+    else if(!cd_xml_match_token(ctx, CD_XML_TOKEN_TAG_END)) {
+        cd_xml_report_error(ctx, ctx->current.text.begin, ctx->current.text.end, "Expected either attribute name, > or />");
+        ctx->status = CD_XML_STATUS_UNEXPECTED_TOKEN;
+        return false;
+    }
+
+    unsigned amps = 0;
+    cd_xml_stringview_t text = { NULL, NULL};
+    const char* tag_start = ctx->matched.text.begin;
+
+    while(ctx->status == CD_XML_STATUS_SUCCESS) {
+
+        if(cd_xml_match_token(ctx, CD_XML_TOKEN_ENDTAG_START)) {
+            if(!cd_xml_expect_token(ctx, CD_XML_TOKEN_NAME, "In end-tag, expected name")) return false;
+            if(!cd_xml_expect_token(ctx, CD_XML_TOKEN_TAG_END, "In end-tag, expected >")) return false;
+
+            if(text.begin != NULL) {
+                cd_xml_stringview_t decoded;
+                if (!cd_xml_decode_entities(ctx, &decoded, text, amps)) return false;
+                cd_xml_report_debug(ctx, "Text '%.*s'", CD_XML_STRINGVIEW_FORMAT(decoded));
+                text.begin = NULL;
+            }
+            break;
+        }
+
+        else if(cd_xml_match_token(ctx, CD_XML_TOKEN_TAG_START)) {
+
+            if(text.begin != NULL) {
+                cd_xml_stringview_t decoded;
+                if (!cd_xml_decode_entities(ctx, &decoded, text, amps)) return false;
+                cd_xml_report_debug(ctx, "Text '%.*s'", CD_XML_STRINGVIEW_FORMAT(decoded));
+                text.begin = NULL;
+            }
+
+            ctx->depth++;
+            if(!cd_xml_parse_element(ctx)) return false;
+            ctx->depth--;
+
+            if(ctx->status != CD_XML_STATUS_SUCCESS) return false;
+        }
+
+        else if(ctx->current.kind == CD_XML_TOKEN_EOF) {
+            ctx->status = CD_XML_STATUS_PREMATURE_EOF;
+            cd_xml_report_error(ctx, tag_start, ctx->chr.text.end,
+                                "EOF while scanning for end of tag %.*s:%.*s",
+                                CD_XML_STRINGVIEW_FORMAT(*ns),
+                                CD_XML_STRINGVIEW_FORMAT(*name));
+            return false;
+        }
+        else {
+            if(ctx->current.kind == CD_XML_TOKEN_AMP) {
+                amps++;
+            }
+            if(text.begin == NULL) {
+                text.begin = ctx->current.text.begin;
+            }
+            text.end = ctx->current.text.end;
+            cd_xml_next_token(ctx);
+        }
+    }
+    return true;
+}
+
+static bool cd_xml_parse_element(cd_xml_ctx_t* ctx)
+{
+    cd_xml_ns_ix_t parent_default_ns = ctx->ns_default;
+    unsigned parent_bind_stack_height = cd_xml_sb_size(ctx->ns_bind_stack);
+    cd_xml_sb_shrink(ctx->tmp_atts, 0);
+
+    cd_xml_stringview_t ns = { NULL, NULL };
+    cd_xml_stringview_t name = ctx->matched.text;
+
+    if(cd_xml_parse_element_tag_start(ctx, &ns, &name)) {
         cd_xml_report_debug(ctx, "< Element %.*s:%.*s",
                             CD_XML_STRINGVIEW_FORMAT(ns),
                             CD_XML_STRINGVIEW_FORMAT(name));
-        return element;
-    }
-    else if(cd_xml_match_token(ctx, CD_XML_TOKEN_TAG_END)) {
-        unsigned amps = 0;
-        cd_xml_stringview_t text = { NULL, NULL};
-        while(ctx->status == CD_XML_STATUS_SUCCESS) {
-            if(cd_xml_match_token(ctx, CD_XML_TOKEN_ENDTAG_START)) {
-                if(!cd_xml_expect_token(ctx, CD_XML_TOKEN_NAME, "In end-tag, expected name")) return NULL;
-                if(!cd_xml_expect_token(ctx, CD_XML_TOKEN_TAG_END, "In end-tag, expected >")) return NULL;
-                if(text.begin != NULL) {
-                    cd_xml_stringview_t decoded;
-                    if (!cd_xml_decode_entities(ctx, &decoded, text, amps)) return false;
-                    cd_xml_report_debug(ctx, "Text '%.*s'", CD_XML_STRINGVIEW_FORMAT(decoded));
-                    text.begin = NULL;
-                }
-                break;
-            }
-            else if(cd_xml_match_token(ctx, CD_XML_TOKEN_TAG_START)) {
-                if(text.begin != NULL) {
-                    cd_xml_stringview_t decoded;
-                    if (!cd_xml_decode_entities(ctx, &decoded, text, amps)) return false;
-                    cd_xml_report_debug(ctx, "Text '%.*s'", CD_XML_STRINGVIEW_FORMAT(decoded));
-                    text.begin = NULL;
-                }
-                ctx->depth++;
-                cd_xml_element_t* child = cd_xml_parse_element(ctx);
-                ctx->depth--;
-                if(ctx->status != CD_XML_STATUS_SUCCESS) return NULL;
-            }
-            else if(ctx->current.kind == CD_XML_TOKEN_EOF) {
-                ctx->status = CD_XML_STATUS_PREMATURE_EOF;
-                cd_xml_report_error(ctx, tag_start, ctx->chr.text.end,
-                                    "EOF while scanning for end of tag %.*s:%.*s",
-                                    CD_XML_STRINGVIEW_FORMAT(ns),
-                                    CD_XML_STRINGVIEW_FORMAT(name));
-
-                return NULL;
-            }
-            else {
-                if(ctx->current.kind == CD_XML_TOKEN_AMP) {
-                    amps++;
-                }
-                if(text.begin == NULL) {
-                    text.begin = ctx->current.text.begin;
-                }
-                text.end = ctx->current.text.end;
-                cd_xml_next_token(ctx);
-            }
+        for(unsigned i=0; i<cd_xml_sb_size(ctx->tmp_atts); i++) {
+            cd_xml_att_triple_t* att = &ctx->tmp_atts[i];
+            cd_xml_report_debug(ctx, "tmp att %u %.*s:%.*s=%.*s", i,
+                                CD_XML_STRINGVIEW_FORMAT(att->ns),
+                                CD_XML_STRINGVIEW_FORMAT(att->name),
+                                CD_XML_STRINGVIEW_FORMAT(att->value));
         }
-        
-        cd_xml_report_debug(ctx, "< Element %.*s:%.*s",
-                          CD_XML_STRINGVIEW_FORMAT(ns),
-                          CD_XML_STRINGVIEW_FORMAT(name));
-        return NULL;
+
+        if(cd_xml_parse_element_contents(ctx, &ns, &name)) {
+            cd_xml_sb_shrink(ctx->ns_bind_stack, parent_bind_stack_height);
+            ctx->ns_default = parent_default_ns;
+            return true;
+        }
     }
-    else {
-        cd_xml_report_error(ctx, ctx->current.text.begin, ctx->current.text.end, "Expected either attribute name, > or />");
-        ctx->status = CD_XML_STATUS_UNEXPECTED_TOKEN;
-        return NULL;
-    }
+    cd_xml_sb_shrink(ctx->ns_bind_stack, parent_bind_stack_height);
+    ctx->ns_default = parent_default_ns;
+    return false;
 }
+
+cd_xml_att_ix_t cd_xml_add_namespace(cd_xml_doc_t* doc,
+                                     cd_xml_stringview_t* prefix,
+                                     cd_xml_stringview_t* uri)
+{
+    assert(uri->begin < uri->end && "URI cannot be empty");
+
+    // Assume that number of namespaces are quite low, so
+    // a linear search will do for now.
+    for(unsigned i=0; i<cd_xml_sb_size(doc->ns); i++) {
+        if(cd_xml_strvcmp(&doc->ns[i].uri, uri)) {
+            // Match
+            if(doc->ns[i].prefix.begin == NULL && prefix->begin != NULL) {
+                // Add prefix to previously defined default namespace
+                doc->ns[i].prefix = *prefix;
+            }
+            return i;
+        }
+    }
+    // Register new namespace
+    unsigned ix = cd_xml_sb_size(doc->ns);
+    cd_xml_ns_t x = {*prefix, *uri};
+    cd_xml_sb_push(doc->ns, x);
+    return ix;
+}
+
 
 void cd_xml_init(cd_xml_doc_t* doc)
 {
@@ -800,7 +857,6 @@ void cd_xml_release(cd_xml_doc_t* doc)
     if (doc == NULL) return;
 
 }
-
 
 cd_xml_status_t cd_xml_init_and_parse(cd_xml_doc_t* doc, const char* data, size_t size)
 {
@@ -816,8 +872,10 @@ cd_xml_status_t cd_xml_init_and_parse(cd_xml_doc_t* doc, const char* data, size_
                 .end = data
             }
         },
+        .ns_default = cd_xml_no_ix,
         .bufs = NULL,
         .depth = 0,
+        
         .status = CD_XML_STATUS_SUCCESS
     };
     

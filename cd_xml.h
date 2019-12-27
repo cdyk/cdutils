@@ -15,11 +15,19 @@ typedef struct {
 } cd_xml_stringview_t;
 
 typedef struct {
-  char dummy;
+    cd_xml_stringview_t name;
+    cd_xml_stringview_t value;
+    cd_xml_ns_ix_t ns;
+    cd_xml_att_ix_t next_attribute;
 } cd_xml_attribute_t;
 
 typedef struct {
-  char dummy;
+    cd_xml_stringview_t name;
+    cd_xml_ns_ix_t ns;
+    cd_xml_elem_ix_t first_child;
+    cd_xml_elem_ix_t last_child;
+    cd_xml_elem_ix_t next_sibling;
+    cd_xml_att_ix_t first_attribute;
 } cd_xml_element_t;
 
 typedef struct cd_xml_ns_struct {
@@ -28,8 +36,9 @@ typedef struct cd_xml_ns_struct {
 } cd_xml_ns_t;
 
 typedef struct {
-    cd_xml_ns_t* ns;    // stretchy-buf
-  char dummy;
+    cd_xml_ns_t* ns;                // Stretchy buf
+    cd_xml_element_t* elements;     // Stretchy buf
+    cd_xml_attribute_t* attributes; // Stretchy buf
 } cd_xml_doc_t;
 
 typedef enum
@@ -47,12 +56,18 @@ typedef enum
 
 
 void cd_xml_init(cd_xml_doc_t* doc);
-void cd_xml_release(cd_xml_doc_t* doc);
-cd_xml_att_ix_t cd_xml_add_namespace(cd_xml_doc_t* doc,
-cd_xml_stringview_t* prefix,
-                              cd_xml_stringview_t* uri);
+
+void cd_xml_free(cd_xml_doc_t* doc);
+
+cd_xml_att_ix_t cd_xml_add_namespace(cd_xml_doc_t* doc, cd_xml_stringview_t* prefix, cd_xml_stringview_t* uri);
+
+cd_xml_elem_ix_t cd_xml_add_element(cd_xml_doc_t* doc, cd_xml_ns_ix_t ns, cd_xml_stringview_t* name, cd_xml_elem_ix_t parent);
 
 
 cd_xml_status_t cd_xml_init_and_parse(cd_xml_doc_t* doc, const char* data, size_t size);
+
+typedef bool (*cd_xml_output_func)(void* userdata, const char* ptr, size_t bytes);
+
+bool cd_xml_write(cd_xml_doc_t* doc, cd_xml_output_func output_func, void* userdata, bool pretty);
 
 #endif // CD_XML_H

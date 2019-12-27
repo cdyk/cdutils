@@ -7,6 +7,14 @@
 #include <string.h>
 
 int main(int argc, const char * argv[]) {
+    {   // Namespaces
+        const char* xml =
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+            "<b:quux />\n";
+        cd_xml_doc_t doc;
+        cd_xml_status_t rv = cd_xml_init_and_parse(&doc, xml, strlen(xml));
+        assert(rv == CD_XML_STATUS_SUCCESS);
+    }
     {   // Misc UTF-tests
         const char* xml =
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!--m oo-->"

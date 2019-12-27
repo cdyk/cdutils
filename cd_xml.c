@@ -4,9 +4,6 @@
 #include <stdarg.h>
 #include "cd_xml.h"
 
-#define CD_XML_LOG_DEBUGV(msg,...) fprintf(stderr, msg"\n", __VA_ARGS__)
-#define CD_XML_LOG_DEBUG(msg) fprintf(stderr, msg"\n")
-
 #define CD_XML_MALLOC(size) malloc(size)
 #define CD_XML_FREE(size) free(size)
 #define CD_XML_REALLOC(ptr,size) realloc(ptr,size)
@@ -56,6 +53,8 @@ typedef struct {
     cd_xml_token_t matched;
 
     cd_xml_buf_t* bufs;
+    unsigned depth;
+
     cd_xml_status_t status;
 } cd_xml_ctx_t;
 
@@ -76,6 +75,19 @@ static void cd_xml_report_error(cd_xml_ctx_t* ctx, const char* a, const char* b,
     for (ptrdiff_t i = 0; i < b - a; i++) fputc('^', stderr);
     fputc('\n', stderr);
 
+    va_list args;
+    va_start(args, fmt);
+    vprintf(fmt, args);
+    va_end(args);
+    fputc('\n', stderr);
+}
+
+static void cd_xml_report_debug(cd_xml_ctx_t* ctx, const char* fmt, ...)
+{
+    static const char indent[] = "..............................";
+    unsigned i = 2*ctx->depth;
+    if (sizeof(indent) < i) { i = (unsigned)sizeof(indent); }
+    fprintf(stderr, "%.*s", i, indent);
     va_list args;
     va_start(args, fmt);
     vprintf(fmt, args);
@@ -287,7 +299,7 @@ restart:
     case 'O': case 'P': case 'Q': case 'R': case 'S': case 'T': case 'U':
     case 'V': case 'W': case 'X': case 'Y': case 'Z':
     case '_':
-        cd_xml_next_char(ctx);
+        //cd_xml_next_char(ctx);
         ctx->current.kind = CD_XML_TOKEN_NAME;
         do { cd_xml_next_char(ctx); } while(cd_xml_is_name_char(ctx->chr.code));
         break;
@@ -534,14 +546,14 @@ static bool cd_xml_parse_xml_decl(cd_xml_ctx_t* ctx, bool is_decl)
                 }
             }
 
-            CD_XML_LOG_DEBUGV("Attribute '%.*s'='%.*s'",
-                              CD_XML_STRINGVIEW_FORMAT(name),
-                              CD_XML_STRINGVIEW_FORMAT(value));
+            cd_xml_report_debug(ctx, "Attribute '%.*s'='%.*s'",
+                                CD_XML_STRINGVIEW_FORMAT(name),
+                                CD_XML_STRINGVIEW_FORMAT(value));
         }
         else if(cd_xml_match_token(ctx, CD_XML_TOKEN_PROC_INSTR_STOP)) {
             match.end = ctx->matched.text.end;
             if (is_decl == false) {
-                CD_XML_LOG_DEBUGV("Skipped xml proc inst '%.*s'", CD_XML_STRINGVIEW_FORMAT(match));
+                cd_xml_report_debug(ctx, "Skipped xml proc inst '%.*s'", CD_XML_STRINGVIEW_FORMAT(match));
             }
             return true;
         }
@@ -580,19 +592,28 @@ static bool cd_xml_parse_attribute(cd_xml_attribute_t** att, cd_xml_ctx_t* ctx)
     cd_xml_stringview_t ns = { NULL, NULL };
     cd_xml_stringview_t name = ctx->matched.text;
     if(cd_xml_match_token(ctx, CD_XML_TOKEN_COLON)) {
+        if (!cd_xml_match_token(ctx, CD_XML_TOKEN_NAME)) {
+            ctx->status = CD_XML_STATUS_UNEXPECTED_TOKEN;
+            cd_xml_report_error(ctx, name.begin, ctx->matched.text.end, "Expected attribute name after ':'");
+            return false;
+        }
         ns = name;
         name = ctx->matched.text;
     }
 
-    if(!cd_xml_expect_token(ctx, CD_XML_TOKEN_EQUAL, "Expected '=' after attribute name")) return false;
+    if (!cd_xml_match_token(ctx, CD_XML_TOKEN_EQUAL)) {
+        ctx->status = CD_XML_STATUS_UNEXPECTED_TOKEN;
+        cd_xml_report_error(ctx, name.begin, ctx->matched.text.end, "Expected '=' after attribute name");
+        return false;
+    }
 
     cd_xml_stringview_t value;
     if(!cd_xml_parse_attribute_value(ctx, &value)) return false;
 
-    CD_XML_LOG_DEBUGV("Attribute %.*s:%.*s='%.*s'",
-                      CD_XML_STRINGVIEW_FORMAT(ns),
-                      CD_XML_STRINGVIEW_FORMAT(name),
-                      CD_XML_STRINGVIEW_FORMAT(value));
+    cd_xml_report_debug(ctx, "Attribute %.*s:%.*s='%.*s'",
+                        CD_XML_STRINGVIEW_FORMAT(ns),
+                        CD_XML_STRINGVIEW_FORMAT(name),
+                        CD_XML_STRINGVIEW_FORMAT(value));
 
 #if 0
     if(cd_xml_cmp_stringview_str(&ns, "xmlns")) {
@@ -618,9 +639,19 @@ static cd_xml_element_t* cd_xml_parse_element(cd_xml_ctx_t* ctx)
     cd_xml_stringview_t ns = { NULL, NULL };
     cd_xml_stringview_t name = ctx->matched.text;
     if(cd_xml_match_token(ctx, CD_XML_TOKEN_COLON)) {
+        if (!cd_xml_match_token(ctx, CD_XML_TOKEN_NAME)) {
+            ctx->status = CD_XML_STATUS_UNEXPECTED_TOKEN;
+            cd_xml_report_error(ctx, name.begin, ctx->matched.text.end, "Expected element name after ':'");
+            return NULL;
+        }
         ns = name;
         name = ctx->matched.text;
     }
+
+    cd_xml_report_debug(ctx, "> Element %.*s:%.*s",
+                        CD_XML_STRINGVIEW_FORMAT(ns),
+                        CD_XML_STRINGVIEW_FORMAT(name));
+
 
     while(cd_xml_match_token(ctx, CD_XML_TOKEN_NAME)) {
         cd_xml_attribute_t* attribute = NULL;
@@ -628,9 +659,9 @@ static cd_xml_element_t* cd_xml_parse_element(cd_xml_ctx_t* ctx)
     }
 
     if(cd_xml_match_token(ctx, CD_XML_TOKEN_EMPTYTAG_END)) {
-        CD_XML_LOG_DEBUGV("Element %.*s:%.*s",
-                          CD_XML_STRINGVIEW_FORMAT(ns),
-                          CD_XML_STRINGVIEW_FORMAT(name));
+        cd_xml_report_debug(ctx, "< Element %.*s:%.*s",
+                            CD_XML_STRINGVIEW_FORMAT(ns),
+                            CD_XML_STRINGVIEW_FORMAT(name));
         return NULL;
     }
     else if(cd_xml_match_token(ctx, CD_XML_TOKEN_TAG_END)) {
@@ -643,7 +674,7 @@ static cd_xml_element_t* cd_xml_parse_element(cd_xml_ctx_t* ctx)
                 if(text.begin != NULL) {
                     cd_xml_stringview_t decoded;
                     if (!cd_xml_decode_entities(ctx, &decoded, text, amps)) return false;
-                    CD_XML_LOG_DEBUGV("Text '%.*s'", CD_XML_STRINGVIEW_FORMAT(decoded));
+                    cd_xml_report_debug(ctx, "Text '%.*s'", CD_XML_STRINGVIEW_FORMAT(decoded));
                     text.begin = NULL;
                 }
                 break;
@@ -652,10 +683,12 @@ static cd_xml_element_t* cd_xml_parse_element(cd_xml_ctx_t* ctx)
                 if(text.begin != NULL) {
                     cd_xml_stringview_t decoded;
                     if (!cd_xml_decode_entities(ctx, &decoded, text, amps)) return false;
-                    CD_XML_LOG_DEBUGV("Text '%.*s'", CD_XML_STRINGVIEW_FORMAT(decoded));
+                    cd_xml_report_debug(ctx, "Text '%.*s'", CD_XML_STRINGVIEW_FORMAT(decoded));
                     text.begin = NULL;
                 }
+                ctx->depth++;
                 cd_xml_element_t* child = cd_xml_parse_element(ctx);
+                ctx->depth--;
                 if(ctx->status != CD_XML_STATUS_SUCCESS) return NULL;
             }
             else if(ctx->current.kind == CD_XML_TOKEN_EOF) {
@@ -679,7 +712,7 @@ static cd_xml_element_t* cd_xml_parse_element(cd_xml_ctx_t* ctx)
             }
         }
         
-        CD_XML_LOG_DEBUGV("Element %.*s:%.*s",
+        cd_xml_report_debug(ctx, "< Element %.*s:%.*s",
                           CD_XML_STRINGVIEW_FORMAT(ns),
                           CD_XML_STRINGVIEW_FORMAT(name));
         return NULL;
@@ -719,6 +752,7 @@ cd_xml_status_t cd_xml_init_and_parse(cd_xml_doc_t* doc, const char* data, size_
             }
         },
         .bufs = NULL,
+        .depth = 0,
         .status = CD_XML_STATUS_SUCCESS
     };
     

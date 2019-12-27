@@ -58,6 +58,30 @@ typedef struct {
     cd_xml_status_t status;
 } cd_xml_ctx_t;
 
+// Stretchy buf ala  https://github.com/nothings/stb/blob/master/stretchy_buffer.h
+
+#define cd_xml__sb_base(a) ((unsigned*)(a)-2)
+#define cd_xml__sb_size(a) (cd_xml__sb_base(a)[0])
+#define cd_xml__sb_cap(a) (cd_xml__sb_base(a)[1])
+#define cd_xml__sb_must_grow(a) (((a)==NULL)||(cd_xml__sb_cap(a) <= cd_xml__sb_size(a)+1u))
+#define cd_xml__sb_do_grow(a) (*(void**)&(a)=cd_xml__sb_grow((a),sizeof(*(a))))
+#define cd_xml__sb_maybe_grow(a) (cd_xml__sb_must_grow(a)?cd_xml__sb_do_grow(a):0)
+
+#define cd_xml_sb_free(a) ((a)?CD_XML_FREE(cd_xml__sb_base(a):0)
+#define cd_xml_sb_size(a) ((a)?cd_xml__sb_size(a):0u)
+#define cd_xml_sb_push(a,x) (cd_xml__sb_maybe_grow(a),(a)[cd_xml__sb_size(a)++]=(x))
+
+static void* cd_xml__sb_grow(void* ptr, size_t item_size)
+{
+    unsigned size = cd_xml_sb_size(ptr);
+    unsigned new_size = 2 * size;
+    if(new_size < 16) new_size = 16;
+    unsigned* base = (unsigned*)CD_XML_REALLOC(ptr ? cd_xml__sb_base(ptr) : NULL, item_size * new_size);
+    assert(base);
+    base[0] = size;
+    base[1] = new_size;
+    return base + 2;
+}
 static void cd_xml_report_error(cd_xml_ctx_t* ctx, const char* a, const char* b, const char* fmt, ...)
 {
     assert(a <= b);

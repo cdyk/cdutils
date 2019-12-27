@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <assert.h>
 #include <stdarg.h>
 #include "cd_xml.h"
@@ -58,6 +59,10 @@ typedef struct {
     cd_xml_status_t status;
 } cd_xml_ctx_t;
 
+
+
+#define cd_xml_strv_empty(a) (a.begin == a.end)
+
 // Stretchy buf ala  https://github.com/nothings/stb/blob/master/stretchy_buffer.h
 
 #define cd_xml__sb_base(a) ((unsigned*)(a)-2)
@@ -82,6 +87,7 @@ static void* cd_xml__sb_grow(void* ptr, size_t item_size)
     base[1] = new_size;
     return base + 2;
 }
+
 static void cd_xml_report_error(cd_xml_ctx_t* ctx, const char* a, const char* b, const char* fmt, ...)
 {
     assert(a <= b);
@@ -119,23 +125,17 @@ static void cd_xml_report_debug(cd_xml_ctx_t* ctx, const char* fmt, ...)
     fputc('\n', stderr);
 }
 
-static cd_xml_stringview_t cd_xml_stringview(const char* str)
+static bool cd_xml_strcmp(cd_xml_stringview_t* a, const char* b)
 {
-    cd_xml_stringview_t rv = {
-        .begin = str,
-        .end = str
-    };
-    while(*rv.end != '\0') { rv.end++; }
-    return rv;
+    size_t n = a->end - a->begin;
+    return (strncmp(a->begin, b, n) == 0) && (b[n] == '\0');
 }
 
-static bool cd_xml_strcmp(cd_xml_stringview_t a, cd_xml_stringview_t b)
+static bool cd_xml_strvcmp(cd_xml_stringview_t* a,cd_xml_stringview_t* b)
 {
-    if( (a.end - a.begin) != (b.end - b.begin)) return false;
-    for(const char *p=a.begin, *q=b.begin; p<a.end; p++,q++) {
-        if(*p != *q) return false;
-    }
-    return true;
+    size_t na = a->end - a->begin;
+    size_t nb = b->end - b->begin;
+    return (na == nb) && (memcmp(a->begin, b->begin, na) == 0);
 }
 
 static bool cd_xml_isspace(uint32_t c)
@@ -450,23 +450,23 @@ static bool cd_xml_decode_entities(cd_xml_ctx_t* ctx, cd_xml_stringview_t* out, 
                 while(in.begin < in.end && *in.begin != ';') { in.begin++; }
                 e.end = in.begin;
 
-                if(cd_xml_strcmp(e, cd_xml_stringview("quot"))) {
+                if(cd_xml_strcmp(&e, "quot")) {
                     assert(end - begin < size);
                     *end++ = '"';
                 }
-                else if(cd_xml_strcmp(e, cd_xml_stringview("amp"))) {
+                else if(cd_xml_strcmp(&e, "amp")) {
                     assert(end - begin < size);
                     *end++ = '&';
                 }
-                else if(cd_xml_strcmp(e, cd_xml_stringview("apos"))) {
+                else if(cd_xml_strcmp(&e, "apos")) {
                     assert(end - begin < size);
                     *end++ = '\'';
                 }
-                else if(cd_xml_strcmp(e, cd_xml_stringview("lt"))) {
+                else if(cd_xml_strcmp(&e, "lt")) {
                     assert(end - begin < size);
                     *end++ = '<';
                 }
-                else if(cd_xml_strcmp(e, cd_xml_stringview("gt"))) {
+                else if(cd_xml_strcmp(&e, "gt")) {
                     assert(end - begin < size);
                     *end++ = '>';
                 }
@@ -526,6 +526,30 @@ static bool cd_xml_parse_attribute_value(cd_xml_ctx_t* ctx, cd_xml_stringview_t*
     return false;
 }
 
+static unsigned cd_xml_add_namespace(cd_xml_doc_t* doc,
+                                     cd_xml_stringview_t* prefix,
+                                     cd_xml_stringview_t* uri)
+{
+    assert(uri->begin < uri->end && "URI cannot be empty");
+
+    // Assume that number of namespaces are quite low, so
+    // a linear search will do for now.
+    for(unsigned i=0; i<cd_xml_sb_size(doc->ns); i++) {
+        if(cd_xml_strvcmp(&doc->ns[i].uri, uri)) {
+            // Match
+            if(doc->ns[i].prefix.begin == NULL && prefix->begin != NULL) {
+                // Add prefix to previously defined default namespace
+                doc->ns[i].prefix = *prefix;
+            }
+            return i;
+        }
+    }
+    // Register new namespace
+    unsigned ix = cd_xml_sb_size(doc->ns);
+    cd_xml_ns_t x = {*prefix, *uri};
+    cd_xml_sb_push(doc->ns, x);
+    return ix;
+}
 
 static bool cd_xml_parse_xml_decl(cd_xml_ctx_t* ctx, bool is_decl)
 {
@@ -542,24 +566,24 @@ static bool cd_xml_parse_xml_decl(cd_xml_ctx_t* ctx, bool is_decl)
 
             if(is_decl) {
 
-                if(cd_xml_strcmp(name, cd_xml_stringview("version"))) {
-                    if(cd_xml_strcmp(value, cd_xml_stringview("1.0"))) { }
+                if(cd_xml_strcmp(&name, "version")) {
+                    if(cd_xml_strcmp(&value, "1.0")) { }
                     else {
                         ctx->status = CD_XML_STATUS_UNSUPPORTED_VERSION;
                         cd_xml_report_error(ctx, att_begin, ctx->chr.text.begin, "Unsupported xml version %.*s", CD_XML_STRINGVIEW_FORMAT(value));
                         return false;
                     }
                 }
-                else if(cd_xml_strcmp(name, cd_xml_stringview("encoding"))) {
-                    if(cd_xml_strcmp(value, cd_xml_stringview("ASCII"))) { }
-                    if(cd_xml_strcmp(value, cd_xml_stringview("UTF-8"))) { }
+                else if(cd_xml_strcmp(&name, "encoding")) {
+                    if(cd_xml_strcmp(&value, "ASCII")) { }
+                    if(cd_xml_strcmp(&value, "UTF-8")) { }
                     else {
                         ctx->status = CD_XML_STATUS_UNSUPPORTED_ENCODING;
                         cd_xml_report_error(ctx, att_begin, ctx->chr.text.begin, "Unsupported encoding %.*s", CD_XML_STRINGVIEW_FORMAT(value));
                         return false;
                     }
                 }
-                else if(cd_xml_strcmp(name, cd_xml_stringview("standalone"))) { /* ignore for now */ }
+                else if(cd_xml_strcmp(&name, "standalone")) { /* ignore for now */ }
                 else {
                     ctx->status = CD_XML_STATUS_MALFORMED_DECLARATION;
                     cd_xml_report_error(ctx, att_begin, ctx->chr.text.begin,
@@ -608,10 +632,9 @@ static bool cd_xml_parse_prolog(cd_xml_ctx_t* ctx)
     return true;
 }
 
-static bool cd_xml_parse_attribute(cd_xml_attribute_t** att, cd_xml_ctx_t* ctx)
+static bool cd_xml_parse_attribute(cd_xml_element_t* element, cd_xml_ctx_t* ctx)
 {
     assert(ctx->matched.kind == CD_XML_TOKEN_NAME);
-    *att = NULL;
 
     cd_xml_stringview_t ns = { NULL, NULL };
     cd_xml_stringview_t name = ctx->matched.text;
@@ -634,23 +657,40 @@ static bool cd_xml_parse_attribute(cd_xml_attribute_t** att, cd_xml_ctx_t* ctx)
     cd_xml_stringview_t value;
     if(!cd_xml_parse_attribute_value(ctx, &value)) return false;
 
+    // Register namespace
+    if(cd_xml_strcmp(&ns, "xmlns")) {
+        if(cd_xml_strv_empty(name)) {
+            ctx->status = CD_XML_STATUS_MALFORMED_ATTRIBUTE;
+            cd_xml_report_error(ctx, name.begin, name.end, "Empty namespace prefix");
+            return false;
+        }
+        else if(cd_xml_strv_empty(value)) {
+            ctx->status = CD_XML_STATUS_MALFORMED_ATTRIBUTE;
+            cd_xml_report_error(ctx, name.begin, ctx->chr.text.end, "Empty namespace uri");
+            return false;
+        }
+        
+        cd_xml_ns_ix_t ns = cd_xml_add_namespace(ctx->doc, &name, &value);
+        return ns != cd_xml_no_ix;
+    }
+
+    // Default namespace
+    if(ns.begin == NULL && cd_xml_strcmp(&name, "xmlns")) {
+        if(cd_xml_strv_empty(value)) {
+            ctx->status = CD_XML_STATUS_MALFORMED_ATTRIBUTE;
+            cd_xml_report_error(ctx, name.begin, ctx->chr.text.end, "Empty namespace uri");
+            return false;
+        }
+
+        cd_xml_ns_ix_t ns = cd_xml_add_namespace(ctx->doc, &name, &value);
+        return ns != cd_xml_no_ix;
+    }
+    
+    
     cd_xml_report_debug(ctx, "Attribute %.*s:%.*s='%.*s'",
                         CD_XML_STRINGVIEW_FORMAT(ns),
                         CD_XML_STRINGVIEW_FORMAT(name),
                         CD_XML_STRINGVIEW_FORMAT(value));
-
-#if 0
-    if(cd_xml_cmp_stringview_str(&ns, "xmlns")) {
-        CD_XML_LOG_DEBUGV("New namespace %.*s=%.*s",
-                          CD_XML_STRINGVIEW_FORMAT(name),
-                          CD_XML_STRINGVIEW_FORMAT(value));
-    }
-    else {
-        CD_XML_LOG_DEBUGV("Attribute %.*s=%.*s",
-                          CD_XML_STRINGVIEW_FORMAT(name),
-                          CD_XML_STRINGVIEW_FORMAT(value));
-    }
-#endif
     return true;
 }
 
@@ -676,17 +716,17 @@ static cd_xml_element_t* cd_xml_parse_element(cd_xml_ctx_t* ctx)
                         CD_XML_STRINGVIEW_FORMAT(ns),
                         CD_XML_STRINGVIEW_FORMAT(name));
 
+    cd_xml_element_t* element = NULL;
 
     while(cd_xml_match_token(ctx, CD_XML_TOKEN_NAME)) {
-        cd_xml_attribute_t* attribute = NULL;
-        if (!cd_xml_parse_attribute(&attribute, ctx)) return NULL;
-    }
+        if (!cd_xml_parse_attribute(element, ctx)) return NULL;
+   }
 
     if(cd_xml_match_token(ctx, CD_XML_TOKEN_EMPTYTAG_END)) {
         cd_xml_report_debug(ctx, "< Element %.*s:%.*s",
                             CD_XML_STRINGVIEW_FORMAT(ns),
                             CD_XML_STRINGVIEW_FORMAT(name));
-        return NULL;
+        return element;
     }
     else if(cd_xml_match_token(ctx, CD_XML_TOKEN_TAG_END)) {
         unsigned amps = 0;
@@ -752,6 +792,7 @@ void cd_xml_init(cd_xml_doc_t* doc)
 {
     if (doc == NULL) return;
 
+    *doc = (cd_xml_doc_t){ 0 };
 }
 
 void cd_xml_release(cd_xml_doc_t* doc)
@@ -793,6 +834,12 @@ cd_xml_status_t cd_xml_init_and_parse(cd_xml_doc_t* doc, const char* data, size_
         cd_xml_parse_element(&ctx);
     }
     cd_xml_expect_token(&ctx, CD_XML_TOKEN_EOF, "Expexted EOF");
+
+    for(unsigned i=0; i<cd_xml_sb_size(doc->ns); i++) {
+        fprintf(stderr, "NS %u: prefix='%.*s', uri='%.*s'\n", i,
+                CD_XML_STRINGVIEW_FORMAT(doc->ns[i].prefix),
+                CD_XML_STRINGVIEW_FORMAT(doc->ns[i].uri));
+    }
     return ctx.status;
 
 fail:

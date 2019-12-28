@@ -61,20 +61,25 @@ typedef enum
 } cd_xml_parse_status_t;
 
 // Holds data of a node, that is an element or text
+
+typedef struct {                                            // Element data
+    cd_xml_stringview_t name;                               // Element name.
+    cd_xml_ns_ix_t      namespace_ix;                       // Element index, cd_xml_no_ix for no namespace.
+    cd_xml_node_ix_t    first_child;                        // Pointer to first child node of this element.
+    cd_xml_node_ix_t    last_child;                         // Pointer to last child node of this element.
+    cd_xml_att_ix_t     first_attribute;                    // Pointer to first attribute of this element.
+    cd_xml_att_ix_t     last_attribute;                     // Pointer to last attribute of this element.
+} node_element_t;
+
+typedef struct {                                            // Text data
+    cd_xml_stringview_t contents;                           // Text contents
+} node_text_t;
+
 typedef struct {
     union {
-        struct {                                            // Element data
-            cd_xml_stringview_t name;                       // Element name.
-            cd_xml_ns_ix_t      namespace_ix;               // Element index, cd_xml_no_ix for no namespace.
-            cd_xml_node_ix_t    first_child;                // Pointer to first child node of this element.
-            cd_xml_node_ix_t    last_child;                 // Pointer to last child node of this element.
-            cd_xml_att_ix_t     first_attribute;            // Pointer to first attribute of this element.
-            cd_xml_att_ix_t     last_attribute;             // Pointer to last attribute of this element.
-        };
-        struct {                                            // Text data
-            cd_xml_stringview_t text;                       // Text contents
-        };
-    };
+        node_element_t          element;
+        node_text_t             text;
+    }                           data;
     cd_xml_node_ix_t            next_sibling;               // Next node sibling of same parent.
     cd_xml_node_kind_t          kind;                       // Kind of node, either CD_XML_NODE_ELEMENT or CD_XML_NODE_TEXT.
 } cd_xml_node_t;
@@ -88,7 +93,7 @@ typedef struct  {
 // Header of memory allocated, stored in a linked list out of cd_xml_doc._t.allocated_buffers.
 typedef struct cd_xml_buf_struct {
     struct cd_xml_buf_struct*   next;                       // Next allocated buffer or NULL.
-    char                        payload[0];                 // Offset of payload data.
+    char                        payload;                    // Offset of payload data.
 } cd_xml_buf_t;
 
 // XML DOM representation
@@ -517,11 +522,11 @@ static bool cd_xml_expect_token(cd_xml_parse_context_t* ctx, cd_xml_token_kind_t
 
 static char* cd_xml_alloc_buf(cd_xml_doc_t* doc, size_t bytes)
 {
-    cd_xml_buf_t* buf = (cd_xml_buf_t*)CD_XML_MALLOC(sizeof(cd_xml_buf_t) + bytes);
+    cd_xml_buf_t* buf = (cd_xml_buf_t*)CD_XML_MALLOC(offsetof(cd_xml_buf_t, payload) + bytes);
     buf->next = doc->allocated_buffers;
     doc->allocated_buffers = buf;
 
-    return buf->payload;
+    return &buf->payload;
 }
 
 static bool cd_xml_decode_entities(cd_xml_parse_context_t* ctx,
@@ -1000,19 +1005,19 @@ cd_xml_node_ix_t cd_xml_add_text(cd_xml_doc_t* doc,
 
     cd_xml_node_t element = {
         .next_sibling = cd_xml_no_ix,
-        .text = *content,
+        .data.text.contents = *content,
         .kind = CD_XML_NODE_TEXT
     };
     cd_xml_node_ix_t elem_ix = cd_xml_sb_size(doc->nodes);
     cd_xml_sb_push(doc->nodes, element);
     if (parent != cd_xml_no_ix) {
-        if (doc->nodes[parent].first_child == cd_xml_no_ix) {    // first child of parent
-            doc->nodes[parent].first_child = elem_ix;
-            doc->nodes[parent].last_child = elem_ix;
+        if (doc->nodes[parent].data.element.first_child == cd_xml_no_ix) {    // first child of parent
+            doc->nodes[parent].data.element.first_child = elem_ix;
+            doc->nodes[parent].data.element.last_child = elem_ix;
         }
         else {
-            doc->nodes[doc->nodes[parent].last_child].next_sibling = elem_ix;
-            doc->nodes[parent].last_child = elem_ix;
+            doc->nodes[doc->nodes[parent].data.element.last_child].next_sibling = elem_ix;
+            doc->nodes[parent].data.element.last_child = elem_ix;
         }
     }
     return elem_ix;
@@ -1028,25 +1033,27 @@ cd_xml_node_ix_t cd_xml_add_element(cd_xml_doc_t* doc,
     assert(((parent == cd_xml_no_ix) || (parent < cd_xml_sb_size(doc->nodes))) && "Invalid parent index");
 
     cd_xml_node_t element = {
-        .first_child = cd_xml_no_ix,
-        .last_child = cd_xml_no_ix,
         .next_sibling = cd_xml_no_ix,
-        .name = *name,
-        .namespace_ix = ns,
-        .first_attribute = cd_xml_no_ix,
-        .last_attribute = cd_xml_no_ix,
-        .kind = CD_XML_NODE_ELEMENT
+        .kind = CD_XML_NODE_ELEMENT,
+        .data.element = {
+            .first_child = cd_xml_no_ix,
+            .last_child = cd_xml_no_ix,
+            .name = *name,
+            .namespace_ix = ns,
+            .first_attribute = cd_xml_no_ix,
+            .last_attribute = cd_xml_no_ix,
+        }
     };
     cd_xml_node_ix_t elem_ix = cd_xml_sb_size(doc->nodes);
     cd_xml_sb_push(doc->nodes, element);
     if (parent != cd_xml_no_ix) {
-        if (doc->nodes[parent].first_child == cd_xml_no_ix) {    // first child of parent
-            doc->nodes[parent].first_child = elem_ix;
-            doc->nodes[parent].last_child = elem_ix;
+        if (doc->nodes[parent].data.element.first_child == cd_xml_no_ix) {    // first child of parent
+            doc->nodes[parent].data.element.first_child = elem_ix;
+            doc->nodes[parent].data.element.last_child = elem_ix;
         }
         else {
-            doc->nodes[doc->nodes[parent].last_child].next_sibling = elem_ix;
-            doc->nodes[parent].last_child = elem_ix;
+            doc->nodes[doc->nodes[parent].data.element.last_child].next_sibling = elem_ix;
+            doc->nodes[parent].data.element.last_child = elem_ix;
         }
     }
     return elem_ix;
@@ -1075,13 +1082,13 @@ cd_xml_att_ix_t cd_xml_add_attribute(cd_xml_doc_t* doc,
     cd_xml_node_t* elem = &doc->nodes[element_ix];
     assert(elem->kind == CD_XML_NODE_ELEMENT);
     
-    if(elem->first_attribute == cd_xml_no_ix) {
-        elem->first_attribute = att_ix;
-        elem->last_attribute = att_ix;
+    if(elem->data.element.first_attribute == cd_xml_no_ix) {
+        elem->data.element.first_attribute = att_ix;
+        elem->data.element.last_attribute = att_ix;
     }
     else {
-        doc->attributes[elem->last_attribute].next_attribute = att_ix;
-        elem->last_attribute = att_ix;
+        doc->attributes[elem->data.element.last_attribute].next_attribute = att_ix;
+        elem->data.element.last_attribute = att_ix;
     }
     return att_ix;
 }
@@ -1113,8 +1120,9 @@ void cd_xml_free(cd_xml_doc_t** doc)
 }
 
 
-cd_xml_parse_status_t cd_xml_init_and_parse(cd_xml_doc_t** doc,
-                                            const char* data, size_t size)
+cd_xml_parse_status_t cd_xml_init_and_parse(cd_xml_doc_t**  doc,
+                                            const char*     data,
+                                            size_t          size)
 {
     if(*doc != NULL) {
         return CD_XML_STATUS_POINTER_NOT_NULL;
@@ -1151,7 +1159,7 @@ cd_xml_parse_status_t cd_xml_init_and_parse(cd_xml_doc_t** doc,
         }
     }
 
-    cd_xml_free(*doc);
+    cd_xml_free(doc);
     *doc = NULL;
 
 exit:
@@ -1161,7 +1169,9 @@ exit:
     return ctx.status;
 }
 
-static bool cd_xml_encode_and_write(cd_xml_output_func output_func, void* userdata, cd_xml_stringview_t* text)
+static bool cd_xml_encode_and_write(cd_xml_output_func      output_func,
+                                    void*                   userdata,
+                                    cd_xml_stringview_t*    text)
 {
     const char* done = text->begin;
     for (const char* p = text->begin; p < text->end; p++) {
@@ -1188,12 +1198,12 @@ static bool cd_xml_encode_and_write(cd_xml_output_func output_func, void* userda
     return true;
 }
 
-static bool cd_xml_write_indent(cd_xml_doc_t* doc,
-                                cd_xml_output_func output_func,
-                                void* userdata,
-                                size_t cols,
-                                bool needs_sep,
-                                bool pretty)
+static bool cd_xml_write_indent(cd_xml_doc_t*       doc,
+                                cd_xml_output_func  output_func,
+                                void*               userdata,
+                                size_t              cols,
+                                bool                needs_sep,
+                                bool                pretty)
 {
     static const char* indent = "\n                                        ";
     const size_t indent_l = strlen(indent);
@@ -1206,12 +1216,12 @@ static bool cd_xml_write_indent(cd_xml_doc_t* doc,
     return true;
 }
 
-static bool cd_xml_write_namespace_defs(cd_xml_doc_t* doc,
-                                        cd_xml_output_func output_func,
-                                        void* userdata,
-                                        cd_xml_node_t* elem,
-                                        size_t depth,
-                                        bool pretty)
+static bool cd_xml_write_namespace_defs(cd_xml_doc_t*       doc,
+                                        cd_xml_output_func  output_func,
+                                        void*               userdata,
+                                        cd_xml_node_t*      elem,
+                                        size_t              depth,
+                                        bool                pretty)
 {
     for (unsigned i = 0; i < cd_xml_sb_size(doc->namespaces); i++) {
         cd_xml_ns_t* ns = &doc->namespaces[i];
@@ -1219,7 +1229,7 @@ static bool cd_xml_write_namespace_defs(cd_xml_doc_t* doc,
         if(!cd_xml_write_indent(doc,
                                 output_func,
                                 userdata,
-                                2 * (size_t)depth + 2 + (elem->name.end - elem->name.begin),
+                                2 * (size_t)depth + 2 + (elem->data.element.name.end - elem->data.element.name.begin),
                                 true,
                                 (i != 0) && pretty)) return false;
         
@@ -1240,13 +1250,13 @@ static bool cd_xml_write_namespace_defs(cd_xml_doc_t* doc,
     return true;
 }
 
-static bool cd_xml_write_element_attributes(cd_xml_doc_t* doc,
-                                            cd_xml_output_func output_func,
-                                            void* userdata,
-                                            cd_xml_node_t* elem,
-                                            size_t depth)
+static bool cd_xml_write_element_attributes(cd_xml_doc_t*       doc,
+                                            cd_xml_output_func  output_func,
+                                            void*               userdata,
+                                            cd_xml_node_t*      elem,
+                                            size_t              depth)
 {
-    for(cd_xml_att_ix_t att_ix = elem->first_attribute; att_ix != cd_xml_no_ix; att_ix = doc->attributes[att_ix].next_attribute) {
+    for(cd_xml_att_ix_t att_ix = elem->data.element.first_attribute; att_ix != cd_xml_no_ix; att_ix = doc->attributes[att_ix].next_attribute) {
         cd_xml_attribute_t* att = &doc->attributes[att_ix];
         if(!output_func(userdata, CD_XML_WRITE_HELPER(" "))) return false;
         if(att->ns != cd_xml_no_ix) {
@@ -1262,9 +1272,12 @@ static bool cd_xml_write_element_attributes(cd_xml_doc_t* doc,
     return true;
 }
 
-
-static bool cd_xml_write_element(cd_xml_doc_t* doc,
-                                 cd_xml_output_func output_func, void* userdata, cd_xml_node_ix_t elem_ix, size_t depth, bool pretty)
+static bool cd_xml_write_element(cd_xml_doc_t*      doc,
+                                 cd_xml_output_func output_func,
+                                 void*              userdata,
+                                 cd_xml_node_ix_t   elem_ix,
+                                 size_t             depth,
+                                 bool               pretty)
 {
 
     assert(elem_ix < cd_xml_sb_size(doc->nodes));
@@ -1279,7 +1292,7 @@ static bool cd_xml_write_element(cd_xml_doc_t* doc,
     
     if (elem->kind == CD_XML_NODE_ELEMENT) {
         if (!output_func(userdata, "<", 1)) return false;
-        if (!output_func(userdata, elem->name.begin, elem->name.end - elem->name.begin)) return false;
+        if (!output_func(userdata, CD_XML_WRITE_HELPERV(elem->data.element.name))) return false;
 
         if (elem_ix == 0) {
             if(!cd_xml_write_namespace_defs(doc,
@@ -1290,14 +1303,14 @@ static bool cd_xml_write_element(cd_xml_doc_t* doc,
                                             output_func, userdata,
                                             elem, depth)) return false;
 
-        if (elem->first_child == cd_xml_no_ix) {
+        if (elem->data.element.first_child == cd_xml_no_ix) {
             if (!output_func(userdata, "/>", 2)) return false;
             return true;
         }
         else {
             if (!output_func(userdata, ">", 1)) return false;
 
-            for (cd_xml_node_ix_t child_ix = elem->first_child; child_ix != cd_xml_no_ix; child_ix = doc->nodes[child_ix].next_sibling) {
+            for (cd_xml_node_ix_t child_ix = elem->data.element.first_child; child_ix != cd_xml_no_ix; child_ix = doc->nodes[child_ix].next_sibling) {
                 if (!cd_xml_write_element(doc, output_func, userdata, child_ix, depth + 1, pretty)) return false;
             }
 
@@ -1309,12 +1322,12 @@ static bool cd_xml_write_element(cd_xml_doc_t* doc,
                                     pretty)) return false;
 
             if (!output_func(userdata, "<//", 2)) return false;
-            if (!output_func(userdata, elem->name.begin, elem->name.end - elem->name.begin)) return false;
+            if (!output_func(userdata,CD_XML_WRITE_HELPERV(elem->data.element.name))) return false;
             if (!output_func(userdata, ">", 1)) return false;
         }
     }
     else if (elem->kind == CD_XML_NODE_TEXT) {
-        if (!cd_xml_encode_and_write(output_func, userdata, &elem->text)) return false;
+        if (!cd_xml_encode_and_write(output_func, userdata, &elem->data.text.contents)) return false;
     }
     else {
         assert(0 && "Illegal elem kind");

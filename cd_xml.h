@@ -34,6 +34,7 @@ typedef struct {
             cd_xml_node_ix_t first_child;
             cd_xml_node_ix_t last_child;
             cd_xml_att_ix_t first_attribute;
+            cd_xml_att_ix_t last_attribute;
         };
         struct {
             cd_xml_stringview_t text;
@@ -75,6 +76,8 @@ void cd_xml_free(cd_xml_doc_t* doc);
 cd_xml_att_ix_t cd_xml_add_namespace(cd_xml_doc_t* doc, cd_xml_stringview_t* prefix, cd_xml_stringview_t* uri);
 
 cd_xml_node_ix_t cd_xml_add_element(cd_xml_doc_t* doc, cd_xml_ns_ix_t ns, cd_xml_stringview_t* name, cd_xml_node_ix_t parent);
+
+cd_xml_att_ix_t cd_xml_add_attribute(cd_xml_doc_t* doc, cd_xml_ns_ix_t ns, cd_xml_stringview_t* name, cd_xml_stringview_t* value, cd_xml_node_ix_t element);
 
 cd_xml_node_ix_t cd_xml_add_text(cd_xml_doc_t* doc, cd_xml_stringview_t* content, cd_xml_node_ix_t parent);
 

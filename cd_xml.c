@@ -795,17 +795,21 @@ static bool cd_xml_parse_element(cd_xml_ctx_t* ctx, cd_xml_node_ix_t parent)
 
     if(cd_xml_parse_element_tag_start(ctx, &ns, &name)) {
 
-        for(unsigned i=0; i<cd_xml_sb_size(ctx->tmp_atts); i++) {
-            cd_xml_att_triple_t* att = &ctx->tmp_atts[i];
-            cd_xml_report_debug(ctx, "tmp att %u %.*s:%.*s=%.*s", i,
-                                CD_XML_STRINGVIEW_FORMAT(att->ns),
-                                CD_XML_STRINGVIEW_FORMAT(att->name),
-                                CD_XML_STRINGVIEW_FORMAT(att->value));
-        }
 
         cd_xml_ns_ix_t ns_ix = cd_xml_no_ix;    // FIXME
 
         cd_xml_node_ix_t elem_ix = cd_xml_add_element(ctx->doc, ns_ix, &name, parent);
+
+        for(unsigned i=0; i<cd_xml_sb_size(ctx->tmp_atts); i++) {
+            cd_xml_att_triple_t* att = &ctx->tmp_atts[i];
+            
+            cd_xml_add_attribute(ctx->doc,
+                                 cd_xml_no_ix,  // FIXME: resolve att->ns
+                                 &att->name,
+                                 &att->value,
+                                 elem_ix);
+        }
+
 
         if(cd_xml_parse_element_contents(ctx, &ns, &name, elem_ix)) {
             cd_xml_sb_shrink(ctx->ns_bind_stack, parent_bind_stack_height);
@@ -886,7 +890,8 @@ cd_xml_node_ix_t cd_xml_add_element(cd_xml_doc_t* doc,
         .next_sibling = cd_xml_no_ix,
         .name = *name,
         .ns = ns,
-        .first_attribute = 0,
+        .first_attribute = cd_xml_no_ix,
+        .last_attribute = cd_xml_no_ix,
         .kind = CD_XML_NODE_ELEMENT
     };
     cd_xml_node_ix_t elem_ix = cd_xml_sb_size(doc->nodes);
@@ -902,6 +907,40 @@ cd_xml_node_ix_t cd_xml_add_element(cd_xml_doc_t* doc,
         }
     }
     return elem_ix;
+}
+
+cd_xml_att_ix_t cd_xml_add_attribute(cd_xml_doc_t* doc,
+                                     cd_xml_ns_ix_t ns,
+                                     cd_xml_stringview_t* name,
+                                     cd_xml_stringview_t* value,
+                                     cd_xml_node_ix_t element_ix)
+{
+    assert(name && "Name cannot be null");
+    assert(value && "Value cannot be null");
+    assert((ns == cd_xml_no_ix || ns < cd_xml_sb_size(doc->ns)) && "Illegal namespace index");
+    assert((element_ix < cd_xml_sb_size(doc->nodes)) && "Illegal element index");
+
+    cd_xml_att_ix_t att_ix = cd_xml_sb_size(doc->attributes);
+    cd_xml_attribute_t att = {
+        .name = *name,
+        .value = *value,
+        .ns = ns,
+        .next_attribute = cd_xml_no_ix
+    };
+    cd_xml_sb_push(doc->attributes, att);
+
+    cd_xml_node_t* elem = &doc->nodes[element_ix];
+    assert(elem->kind == CD_XML_NODE_ELEMENT);
+    
+    if(elem->first_attribute == cd_xml_no_ix) {
+        elem->first_attribute = att_ix;
+        elem->last_attribute = att_ix;
+    }
+    else {
+        doc->attributes[elem->last_attribute].next_attribute = att_ix;
+        elem->last_attribute = att_ix;
+    }
+    return att_ix;
 }
 
 
@@ -990,56 +1029,106 @@ static bool cd_xml_encode_and_write(cd_xml_output_func output_func, void* userda
     return true;
 }
 
-static bool cd_xml_write_element(cd_xml_doc_t* doc, cd_xml_output_func output_func, void* userdata, cd_xml_node_ix_t elem_ix, unsigned depth, bool pretty)
+static bool cd_xml_write_indent(cd_xml_doc_t* doc,
+                                cd_xml_output_func output_func,
+                                void* userdata,
+                                size_t cols,
+                                bool needs_sep,
+                                bool pretty)
 {
     static const char* indent = "\n                                        ";
     const size_t indent_l = strlen(indent);
+    if (pretty) {
+        if (!output_func(userdata, indent, CD_XML_MIN(cols + 1, indent_l))) return false;
+    }
+    else if(needs_sep) {
+              if (!output_func(userdata, CD_XML_WRITE_HELPER(" "))) return false;
+    }
+    return true;
+}
+
+static bool cd_xml_write_namespace_defs(cd_xml_doc_t* doc,
+                                        cd_xml_output_func output_func,
+                                        void* userdata,
+                                        cd_xml_node_t* elem,
+                                        size_t depth,
+                                        bool pretty)
+{
+    for (unsigned i = 0; i < cd_xml_sb_size(doc->ns); i++) {
+        cd_xml_ns_t* ns = &doc->ns[i];
+
+        if(!cd_xml_write_indent(doc,
+                                output_func,
+                                userdata,
+                                2 * (size_t)depth + 2 + (elem->name.end - elem->name.begin),
+                                true,
+                                (i != 0) && pretty)) return false;
+        
+        if (cd_xml_strv_empty(ns->prefix)) {    // default namespace
+            if (!output_func(userdata, CD_XML_WRITE_HELPER("xmlns=\""))) return false;
+            if (!output_func(userdata, CD_XML_WRITE_HELPERV(ns->uri))) return false;
+            if (!output_func(userdata, CD_XML_WRITE_HELPER("\""))) return false;
+        }
+        else {                                  // prefixed namespace
+            if (!output_func(userdata, CD_XML_WRITE_HELPER("xmlns:"))) return false;
+            if (!output_func(userdata, CD_XML_WRITE_HELPERV(ns->prefix))) return false;
+            if (!output_func(userdata, CD_XML_WRITE_HELPER("=\""))) return false;
+            if (!output_func(userdata, CD_XML_WRITE_HELPERV(ns->uri))) return false;
+            if (!output_func(userdata, CD_XML_WRITE_HELPER("\""))) return false;
+        }
+    }
+
+    return true;
+}
+
+static bool cd_xml_write_element_attributes(cd_xml_doc_t* doc,
+                                            cd_xml_output_func output_func,
+                                            void* userdata,
+                                            cd_xml_node_t* elem,
+                                            size_t depth)
+{
+    for(cd_xml_att_ix_t att_ix = elem->first_attribute; att_ix != cd_xml_no_ix; att_ix = doc->attributes[att_ix].next_attribute) {
+        cd_xml_attribute_t* att = &doc->attributes[att_ix];
+        if(!output_func(userdata, CD_XML_WRITE_HELPER(" "))) return false;
+        if(att->ns != cd_xml_no_ix) {
+            assert(att->ns < cd_xml_sb_size(doc->attributes));
+            if(!output_func(userdata, CD_XML_WRITE_HELPERV(doc->ns[att->ns].prefix))) return false;
+            if(!output_func(userdata, CD_XML_WRITE_HELPER(":"))) return false;
+        }
+        if(!output_func(userdata, CD_XML_WRITE_HELPERV(att->name))) return false;
+        if(!output_func(userdata, CD_XML_WRITE_HELPER("=\""))) return false;
+        if(!cd_xml_encode_and_write(output_func, userdata, &att->value)) return false;
+        if(!output_func(userdata, CD_XML_WRITE_HELPER("\""))) return false;
+    }
+    return true;
+}
+
+
+static bool cd_xml_write_element(cd_xml_doc_t* doc, cd_xml_output_func output_func, void* userdata, cd_xml_node_ix_t elem_ix, size_t depth, bool pretty)
+{
 
     assert(elem_ix < cd_xml_sb_size(doc->nodes));
     cd_xml_node_t* elem = &doc->nodes[elem_ix];
 
-    if (pretty) {
-        if (!output_func(userdata, indent, CD_XML_MIN(2 * (size_t)depth + 1, indent_l))) return false;
-    }
+    if(!cd_xml_write_indent(doc,
+                            output_func,
+                            userdata,
+                            2 * depth,
+                            false,
+                            pretty)) return false;
+    
     if (elem->kind == CD_XML_NODE_ELEMENT) {
         if (!output_func(userdata, "<", 1)) return false;
         if (!output_func(userdata, elem->name.begin, elem->name.end - elem->name.begin)) return false;
 
         if (elem_ix == 0) {
-
-
-            for (unsigned i = 0; i < cd_xml_sb_size(doc->ns); i++) {
-                cd_xml_ns_t* ns = &doc->ns[i];
-
-                if (i == 0 || !pretty) {
-                    if (!output_func(userdata, " ", 1)) return false;
-                }
-                else {
-                    if (!output_func(userdata, indent, CD_XML_MIN(2 * (size_t)depth + 3 + (elem->name.end - elem->name.begin), indent_l))) return false;
-                }
-
-                if (cd_xml_strv_empty(ns->prefix)) {    // default namespace
-                    if (!output_func(userdata, CD_XML_WRITE_HELPER("xmlns=\""))) return false;
-                    if (!output_func(userdata, CD_XML_WRITE_HELPERV(ns->uri))) return false;
-                    if (!output_func(userdata, CD_XML_WRITE_HELPER("\""))) return false;
-                }
-                else {                                  // prefixed namespace
-                    if (!output_func(userdata, CD_XML_WRITE_HELPER("xmlns:"))) return false;
-                    if (!output_func(userdata, CD_XML_WRITE_HELPERV(ns->prefix))) return false;
-                    if (!output_func(userdata, CD_XML_WRITE_HELPER("=\""))) return false;
-                    if (!output_func(userdata, CD_XML_WRITE_HELPERV(ns->uri))) return false;
-                    if (!output_func(userdata, CD_XML_WRITE_HELPER("\""))) return false;
-                }
-            }
-
-/*            
-                fprintf(stderr, "NS %u: prefix='%.*s', uri='%.*s'\n", i,
-                        CD_XML_STRINGVIEW_FORMAT(doc->ns[i].prefix),
-                        CD_XML_STRINGVIEW_FORMAT(doc->ns[i].uri));
-            }
-            */
-
+            if(!cd_xml_write_namespace_defs(doc,
+                                            output_func, userdata,
+                                            elem, depth, pretty)) return false;
         }
+        if(!cd_xml_write_element_attributes(doc,
+                                            output_func, userdata,
+                                            elem, depth)) return false;
 
         if (elem->first_child == cd_xml_no_ix) {
             if (!output_func(userdata, "/>", 2)) return false;
@@ -1051,9 +1140,14 @@ static bool cd_xml_write_element(cd_xml_doc_t* doc, cd_xml_output_func output_fu
             for (cd_xml_node_ix_t child_ix = elem->first_child; child_ix != cd_xml_no_ix; child_ix = doc->nodes[child_ix].next_sibling) {
                 if (!cd_xml_write_element(doc, output_func, userdata, child_ix, depth + 1, pretty)) return false;
             }
-            if (pretty) {
-                if (!output_func(userdata, indent, CD_XML_MIN(2 * depth + 1, indent_l))) return false;
-            }
+
+            if(!cd_xml_write_indent(doc,
+                                    output_func,
+                                    userdata,
+                                    2 * depth,
+                                    false,
+                                    pretty)) return false;
+
             if (!output_func(userdata, "<//", 2)) return false;
             if (!output_func(userdata, elem->name.begin, elem->name.end - elem->name.begin)) return false;
             if (!output_func(userdata, ">", 1)) return false;

@@ -263,7 +263,7 @@ static void* cd_xml__sb_grow(void* ptr, size_t item_size)
     unsigned new_size = 2 * size;
     if(new_size < 16) new_size = 16;
     unsigned* base = (unsigned*)CD_XML_REALLOC(ptr ? cd_xml__sb_base(ptr) : NULL, 2*sizeof(unsigned) + item_size * new_size);
-    assert(base);
+    assert(base && "Failed to allocate memory");
     base[0] = size;
     base[1] = new_size;
     return base + 2;
@@ -540,6 +540,7 @@ static bool cd_xml_expect_token(cd_xml_parse_context_t* ctx, cd_xml_token_kind_t
 static char* cd_xml_alloc_buf(cd_xml_doc_t* doc, size_t bytes)
 {
     cd_xml_buf_t* buf = (cd_xml_buf_t*)CD_XML_MALLOC(offsetof(cd_xml_buf_t, payload) + bytes);
+    assert(buf && "Failed to allocate memory");
     buf->next = doc->allocated_buffers;
     doc->allocated_buffers = buf;
 
@@ -983,7 +984,14 @@ static bool cd_xml_resolve_namespace(cd_xml_parse_context_t*    ctx,
     // Note: Assumption here is that the number of namespaces are pretty low (1-3),
     // so a linear search suffices.
     unsigned n = cd_xml_sb_size(ctx->namespace_resolve_stack);
+#ifdef _WIN32
+#pragma warning(push)
+#pragma warning(disable:6293)
+#endif
     for(unsigned i = n-1; i<n; i--) {
+#ifdef _WIN32
+#pragma warning(pop)
+#endif
         if(cd_xml_strvcmp(&ctx->namespace_resolve_stack[i].prefix, prefix)) {
             *ns_ix = ctx->namespace_resolve_stack[i].namespace_ix;
             return true;
@@ -1166,6 +1174,7 @@ cd_xml_att_ix_t cd_xml_add_attribute(cd_xml_doc_t* doc,
 cd_xml_doc_t* cd_xml_init()
 {
     cd_xml_doc_t* doc = CD_XML_MALLOC(sizeof(cd_xml_doc_t));
+    assert(doc && "Failed to allocate memory");
     memset(doc, 0, sizeof(cd_xml_doc_t));
     return doc;
 }
@@ -1446,8 +1455,7 @@ bool cd_xml_apply_visitor_recurse(cd_xml_doc_t*           doc,
     assert(elem->kind == CD_XML_NODE_ELEMENT);
     
     if(elem_enter) {
-        if(!elem_enter(doc,
-                       userdata,
+        if(!elem_enter(userdata, doc,
                        elem->data.element.namespace_ix,
                        &elem->data.element.name)) return false;
     }
@@ -1473,8 +1481,10 @@ bool cd_xml_apply_visitor_recurse(cd_xml_doc_t*           doc,
                                              text,
                                              child)) return false;
         }
-        else if(child->kind == CD_XML_NODE_ELEMENT) {
-            
+        else if(child->kind == CD_XML_NODE_TEXT) {
+            if (text) {
+                if (!text(userdata, doc, &child->data.text.contents)) return false;
+            }
         }
         else {
             assert(0 && "Illegal node kind");
@@ -1483,8 +1493,7 @@ bool cd_xml_apply_visitor_recurse(cd_xml_doc_t*           doc,
     }
 
     if(elem_exit) {
-        if(!elem_exit(doc,
-                      userdata,
+        if(!elem_exit(userdata, doc,
                       elem->data.element.namespace_ix,
                       &elem->data.element.name)) return false;
     }
@@ -1509,7 +1518,7 @@ bool cd_xml_apply_visitor(cd_xml_doc_t*           doc,
                                         elem_exit,
                                         attribute,
                                         text,
-                                        0);
+                                        &doc->nodes[0]);
 }
 
 

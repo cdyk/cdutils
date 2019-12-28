@@ -8,6 +8,7 @@ extern "C" {
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <string.h>
 
 typedef uint32_t cd_xml_ns_ix_t;
 
@@ -45,6 +46,12 @@ typedef enum {
 
 typedef enum
 {
+    CD_XML_FLAGS_NONE           = 0,
+    CD_XML_FLAGS_COPY_STRINGS   = 1
+} cd_xml_flags_t;
+
+typedef enum
+{
     CD_XML_STATUS_SUCCESS = 0,
     CD_XML_STATUS_POINTER_NOT_NULL,
     CD_XML_STATUS_UNKNOWN_NAMESPACE_PREFIX,
@@ -70,7 +77,7 @@ typedef struct {                                            // Element data
 } node_element_t;
 
 typedef struct {                                            // Text data
-    cd_xml_stringview_t contents;                           // Text contents
+    cd_xml_stringview_t content;                           // Text contents
 } node_text_t;
 
 typedef struct {
@@ -119,26 +126,31 @@ void cd_xml_free(cd_xml_doc_t** doc);
 
 cd_xml_att_ix_t cd_xml_add_namespace(cd_xml_doc_t*          doc,
                                      cd_xml_stringview_t*   prefix,
-                                     cd_xml_stringview_t*   uri);
+                                     cd_xml_stringview_t*   uri,
+                                     cd_xml_flags_t         flags);
 
 cd_xml_node_ix_t cd_xml_add_element(cd_xml_doc_t*           doc,
                                     cd_xml_ns_ix_t          ns,
                                     cd_xml_stringview_t*    name,
-                                    cd_xml_node_ix_t        parent);
+                                    cd_xml_node_ix_t        parent,
+                                    cd_xml_flags_t          flags);
 
 cd_xml_att_ix_t cd_xml_add_attribute(cd_xml_doc_t*          doc,
                                      cd_xml_ns_ix_t         ns,
                                      cd_xml_stringview_t*   name,
                                      cd_xml_stringview_t*   value,
-                                     cd_xml_node_ix_t       element);
+                                     cd_xml_node_ix_t       element,
+                                     cd_xml_flags_t         flags);
 
-cd_xml_node_ix_t cd_xml_add_text(cd_xml_doc_t*              doc,
-                                 cd_xml_stringview_t*       content,
-                                 cd_xml_node_ix_t           parent);
+cd_xml_node_ix_t cd_xml_add_text(cd_xml_doc_t*        doc,
+                                 cd_xml_stringview_t* content,
+                                 cd_xml_node_ix_t     parent,
+                                 cd_xml_flags_t       flags);
 
 cd_xml_parse_status_t cd_xml_init_and_parse(cd_xml_doc_t**  doc,
                                             const char*     data,
-                                            size_t          size);
+                                            size_t          size,
+                                            cd_xml_flags_t  flags);
 
 bool cd_xml_write(cd_xml_doc_t*         doc,
                   cd_xml_output_func    output_func,
@@ -152,12 +164,20 @@ bool cd_xml_apply_visitor(cd_xml_doc_t*           doc,
                           cd_xml_visit_attribute  attribute,
                           cd_xml_visit_text       text);
 
+// Helper func to create stringviews from C-strings
+inline cd_xml_stringview_t cd_xml_strv(const char* str)
+{
+    cd_xml_stringview_t rv;
+    rv.begin = str;
+    rv.end = str + strlen(str);
+    return rv;
+}
+
 
 #ifdef CD_XML_IMPLEMENTATION
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <assert.h>
 #include <stdarg.h>
 
@@ -229,6 +249,7 @@ typedef struct {
     cd_xml_att_triple_t*        attribute_stash;            // Temp stash used when parsing attributes.
     cd_xml_ns_ix_t              namespace_default;          // Current default namespace.
     cd_xml_namespace_binding_t* namespace_resolve_stack;    // Namespace-prefix bindings, most recent bindings last.
+    cd_xml_flags_t              flags;                      //
     cd_xml_parse_status_t       status;                     // Either success or first error encountered.
 } cd_xml_parse_context_t;
 
@@ -238,7 +259,7 @@ typedef struct {
 #define CD_XML_WRITE_HELPER(a) (a), strlen(a)
 #define CD_XML_WRITE_HELPERV(a) (a).begin, (a).end-(a).begin
 
-#define cd_xml_strv_empty(a) (a.begin == a.end)
+#define cd_xml_strv_empty(a) ((a).begin == (a).end)
 
 // Stretchy bufs ala  https://github.com/nothings/stb/blob/master/stretchy_buffer.h
 
@@ -547,6 +568,21 @@ static char* cd_xml_alloc_buf(cd_xml_doc_t* doc, size_t bytes)
     return &buf->payload;
 }
 
+static cd_xml_stringview_t cd_xml_strvdup(cd_xml_doc_t* doc, const cd_xml_stringview_t* src)
+{
+    if (cd_xml_strv_empty(*src)) return *src;
+    assert(src->begin < src->end);
+
+    size_t N = src->end - src->begin;
+    char* buf = cd_xml_alloc_buf(doc, N);
+    memcpy(buf, src->begin, N);
+
+    cd_xml_stringview_t rv;
+    rv.begin = buf;
+    rv.end = buf + N;
+    return rv;
+}
+
 static bool cd_xml_decode_entities(cd_xml_parse_context_t* ctx,
                                    cd_xml_stringview_t* out,
                                    cd_xml_stringview_t in,
@@ -827,7 +863,7 @@ static bool cd_xml_parse_attribute(cd_xml_parse_context_t* ctx)
             return false;
         }
         
-        cd_xml_ns_ix_t ns = cd_xml_add_namespace(ctx->doc, &name, &value);
+        cd_xml_ns_ix_t ns = cd_xml_add_namespace(ctx->doc, &name, &value, ctx->flags);
         
         cd_xml_namespace_binding_t binding = {
             .prefix = name,
@@ -845,7 +881,7 @@ static bool cd_xml_parse_attribute(cd_xml_parse_context_t* ctx)
             return false;
         }
 
-        cd_xml_ns_ix_t namespace_ix = cd_xml_add_namespace(ctx->doc, NULL, &value);
+        cd_xml_ns_ix_t namespace_ix = cd_xml_add_namespace(ctx->doc, NULL, &value, ctx->flags);
         ctx->namespace_default = namespace_ix;
         return namespace_ix != cd_xml_no_ix;
     }
@@ -934,7 +970,7 @@ static bool cd_xml_parse_element_contents(cd_xml_parse_context_t*   ctx,
             if(text.begin != NULL) {
                 cd_xml_stringview_t decoded;
                 if (!cd_xml_decode_entities(ctx, &decoded, text, amps)) return false;
-                cd_xml_add_text(ctx->doc, &decoded, parent);
+                cd_xml_add_text(ctx->doc, &decoded, parent, ctx->flags);
                 text.begin = NULL;
             }
             break;
@@ -945,7 +981,7 @@ static bool cd_xml_parse_element_contents(cd_xml_parse_context_t*   ctx,
             if(text.begin != NULL) {
                 cd_xml_stringview_t decoded;
                 if (!cd_xml_decode_entities(ctx, &decoded, text, amps)) return false;
-                cd_xml_add_text(ctx->doc, &decoded, parent);
+                cd_xml_add_text(ctx->doc, &decoded, parent, ctx->flags);
                 text.begin = NULL;
             }
 
@@ -1017,7 +1053,7 @@ static bool cd_xml_parse_element(cd_xml_parse_context_t* ctx, cd_xml_node_ix_t p
         if(!cd_xml_strv_empty(elem_ns)) {
             if(!cd_xml_resolve_namespace(ctx, &elem_ns_ix, &elem_ns)) return false;
         }
-        cd_xml_node_ix_t elem_ix = cd_xml_add_element(ctx->doc, elem_ns_ix, &elem_name, parent);
+        cd_xml_node_ix_t elem_ix = cd_xml_add_element(ctx->doc, elem_ns_ix, &elem_name, parent, ctx->flags);
 
         for(unsigned i=0; i<cd_xml_sb_size(ctx->attribute_stash); i++) {
             cd_xml_att_triple_t* att = &ctx->attribute_stash[i];
@@ -1032,7 +1068,8 @@ static bool cd_xml_parse_element(cd_xml_parse_context_t* ctx, cd_xml_node_ix_t p
                                  att_ns_ix,
                                  &att->name,
                                  &att->value,
-                                 elem_ix);
+                                 elem_ix,
+                                 ctx->flags);
         }
 
 
@@ -1049,7 +1086,8 @@ static bool cd_xml_parse_element(cd_xml_parse_context_t* ctx, cd_xml_node_ix_t p
 
 cd_xml_att_ix_t cd_xml_add_namespace(cd_xml_doc_t* doc,
                                      cd_xml_stringview_t* prefix,
-                                     cd_xml_stringview_t* uri)
+                                     cd_xml_stringview_t* uri,
+                                     cd_xml_flags_t       flags)
 {
     assert(uri->begin < uri->end && "URI cannot be empty");
 
@@ -1061,32 +1099,38 @@ cd_xml_att_ix_t cd_xml_add_namespace(cd_xml_doc_t* doc,
             return i;
         }
     }
+
     // Register new namespace
     unsigned ix = cd_xml_sb_size(doc->namespaces);
     cd_xml_ns_t x = {0};
+    bool copy = (flags & CD_XML_FLAGS_COPY_STRINGS);
     if (prefix) {
-        x.prefix = *prefix;
+        x.prefix = copy ? cd_xml_strvdup(doc, prefix) : *prefix;
     }
-    x.uri = *uri;
+    x.uri = copy ? cd_xml_strvdup(doc, uri) : *uri;
     cd_xml_sb_push(doc->namespaces, x);
     return ix;
 }
 
-cd_xml_node_ix_t cd_xml_add_text(cd_xml_doc_t* doc,
+cd_xml_node_ix_t cd_xml_add_text(cd_xml_doc_t*        doc,
                                  cd_xml_stringview_t* content,
-                                 cd_xml_node_ix_t parent)
+                                 cd_xml_node_ix_t     parent,
+                                 cd_xml_flags_t       flags)
 {
     assert((parent != cd_xml_no_ix) && "Text node must have a parent");
     assert((cd_xml_sb_size(doc->nodes) != 0) && "Text node cannot be root");
     assert((doc->nodes[parent].kind == CD_XML_NODE_ELEMENT) && "Parent node of text must be an element");
 
-    cd_xml_node_t element = {
+    cd_xml_node_t text = {
         .next_sibling = cd_xml_no_ix,
-        .data.text.contents = *content,
+        .data.text.content = *content,
         .kind = CD_XML_NODE_TEXT
     };
+    if (flags & CD_XML_FLAGS_COPY_STRINGS) {
+        text.data.text.content = cd_xml_strvdup(doc, content);
+    }
     cd_xml_node_ix_t elem_ix = cd_xml_sb_size(doc->nodes);
-    cd_xml_sb_push(doc->nodes, element);
+    cd_xml_sb_push(doc->nodes, text);
     if (parent != cd_xml_no_ix) {
         if (doc->nodes[parent].data.element.first_child == cd_xml_no_ix) {    // first child of parent
             doc->nodes[parent].data.element.first_child = elem_ix;
@@ -1101,10 +1145,11 @@ cd_xml_node_ix_t cd_xml_add_text(cd_xml_doc_t* doc,
 }
 
 
-cd_xml_node_ix_t cd_xml_add_element(cd_xml_doc_t* doc,
-                                    cd_xml_ns_ix_t ns,
+cd_xml_node_ix_t cd_xml_add_element(cd_xml_doc_t*        doc,
+                                    cd_xml_ns_ix_t       ns,
                                     cd_xml_stringview_t* name,
-                                    cd_xml_node_ix_t parent)
+                                    cd_xml_node_ix_t     parent,
+                                    cd_xml_flags_t       flags)
 {
     assert(((parent != cd_xml_no_ix) || (cd_xml_sb_size(doc->nodes) == 0)) && "Root element must be the first element added to the document");
     assert(((parent == cd_xml_no_ix) || (parent < cd_xml_sb_size(doc->nodes))) && "Invalid parent index");
@@ -1121,6 +1166,9 @@ cd_xml_node_ix_t cd_xml_add_element(cd_xml_doc_t* doc,
             .last_attribute = cd_xml_no_ix,
         }
     };
+    if (flags & CD_XML_FLAGS_COPY_STRINGS) {
+        element.data.element.name = cd_xml_strvdup(doc, name);
+    }
     cd_xml_node_ix_t elem_ix = cd_xml_sb_size(doc->nodes);
     cd_xml_sb_push(doc->nodes, element);
     if (parent != cd_xml_no_ix) {
@@ -1136,11 +1184,12 @@ cd_xml_node_ix_t cd_xml_add_element(cd_xml_doc_t* doc,
     return elem_ix;
 }
 
-cd_xml_att_ix_t cd_xml_add_attribute(cd_xml_doc_t* doc,
-                                     cd_xml_ns_ix_t ns,
+cd_xml_att_ix_t cd_xml_add_attribute(cd_xml_doc_t*        doc,
+                                     cd_xml_ns_ix_t       ns,
                                      cd_xml_stringview_t* name,
                                      cd_xml_stringview_t* value,
-                                     cd_xml_node_ix_t element_ix)
+                                     cd_xml_node_ix_t     element_ix,
+                                     cd_xml_flags_t       flags)
 {
     assert(name && "Name cannot be null");
     assert(value && "Value cannot be null");
@@ -1154,6 +1203,10 @@ cd_xml_att_ix_t cd_xml_add_attribute(cd_xml_doc_t* doc,
         .ns = ns,
         .next_attribute = cd_xml_no_ix
     };
+    if (flags & CD_XML_FLAGS_COPY_STRINGS) {
+        att.name = cd_xml_strvdup(doc, name);
+        att.value = cd_xml_strvdup(doc, value);  // Note: If invoked from parser, doc already owns this string.
+    }
     cd_xml_sb_push(doc->attributes, att);
 
     cd_xml_node_t* elem = &doc->nodes[element_ix];
@@ -1200,7 +1253,8 @@ void cd_xml_free(cd_xml_doc_t** doc)
 
 cd_xml_parse_status_t cd_xml_init_and_parse(cd_xml_doc_t**  doc,
                                             const char*     data,
-                                            size_t          size)
+                                            size_t          size,
+                                            cd_xml_flags_t  flags)
 {
     if(*doc != NULL) {
         return CD_XML_STATUS_POINTER_NOT_NULL;
@@ -1220,6 +1274,7 @@ cd_xml_parse_status_t cd_xml_init_and_parse(cd_xml_doc_t**  doc,
             }
         },
         .namespace_default = cd_xml_no_ix,
+        .flags = flags,
         .status = CD_XML_STATUS_SUCCESS
     };
     
@@ -1423,7 +1478,7 @@ static bool cd_xml_write_element(cd_xml_doc_t*      doc,
         }
     }
     else if (elem->kind == CD_XML_NODE_TEXT) {
-        if (!cd_xml_encode_and_write(output_func, userdata, &elem->data.text.contents)) return false;
+        if (!cd_xml_encode_and_write(output_func, userdata, &elem->data.text.content)) return false;
     }
     else {
         assert(0 && "Illegal elem kind");
@@ -1483,7 +1538,7 @@ bool cd_xml_apply_visitor_recurse(cd_xml_doc_t*           doc,
         }
         else if(child->kind == CD_XML_NODE_TEXT) {
             if (text) {
-                if (!text(userdata, doc, &child->data.text.contents)) return false;
+                if (!text(userdata, doc, &child->data.text.content)) return false;
             }
         }
         else {

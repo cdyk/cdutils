@@ -17,9 +17,6 @@ typedef uint32_t cd_xml_node_ix_t;
 
 static const uint32_t cd_xml_no_ix = (uint32_t)-1;
 
-// Callback function for consuming output from writer
-typedef bool (*cd_xml_output_func)(void* userdata, const char* ptr, size_t bytes);
-
 
 // Stretchy-buf helpers
 #define cd_xml__sb_base(a) ((unsigned*)(a)-2)
@@ -105,6 +102,17 @@ typedef struct {
     cd_xml_buf_t*               allocated_buffers;          // Backing for modifieds strings.
 } cd_xml_doc_t;
 
+// Callback function for consuming output from writer
+typedef bool (*cd_xml_output_func)(void* userdata, const char* ptr, size_t bytes);
+
+// Visitor callback functions
+
+typedef bool(*cd_xml_visit_elem_enter)(void* userdata, cd_xml_doc_t* doc, cd_xml_ns_ix_t namespace_ix, cd_xml_stringview_t* name);
+typedef bool(*cd_xml_visit_elem_exit)(void* userdata, cd_xml_doc_t* doc, cd_xml_ns_ix_t namespace_ix, cd_xml_stringview_t* name);
+typedef bool(*cd_xml_visit_attribute)(void* userdata, cd_xml_doc_t* doc, cd_xml_ns_ix_t namespace_ix, cd_xml_stringview_t* name, cd_xml_stringview_t* value);
+typedef bool(*cd_xml_visit_text)(void* userdata, cd_xml_doc_t* doc, cd_xml_stringview_t* text);
+
+
 cd_xml_doc_t* cd_xml_init(void);
 
 void cd_xml_free(cd_xml_doc_t** doc);
@@ -136,6 +144,14 @@ bool cd_xml_write(cd_xml_doc_t*         doc,
                   cd_xml_output_func    output_func,
                   void*                 userdata,
                   bool                  pretty);
+
+bool cd_xml_apply_visitor(cd_xml_doc_t*           doc,
+                          void*                   userdata,
+                          cd_xml_visit_elem_enter elem_enter,
+                          cd_xml_visit_elem_exit  elem_exit,
+                          cd_xml_visit_attribute  attribute,
+                          cd_xml_visit_text       text);
+
 
 #ifdef CD_XML_IMPLEMENTATION
 
@@ -1416,6 +1432,86 @@ bool cd_xml_write(cd_xml_doc_t* doc, cd_xml_output_func output_func, void* userd
     if (!output_func(userdata, "\n", 1)) return false;
     return true;
 }
+
+bool cd_xml_apply_visitor_recurse(cd_xml_doc_t*           doc,
+                                  void*                   userdata,
+                                  cd_xml_visit_elem_enter elem_enter,
+                                  cd_xml_visit_elem_exit  elem_exit,
+                                  cd_xml_visit_attribute  attribute,
+                                  cd_xml_visit_text       text,
+                                  cd_xml_node_t*          elem)
+{
+    unsigned M = cd_xml_sb_size(doc->nodes);
+    unsigned N = cd_xml_sb_size(doc->attributes);
+    assert(elem->kind == CD_XML_NODE_ELEMENT);
+    
+    if(elem_enter) {
+        if(!elem_enter(doc,
+                       userdata,
+                       elem->data.element.namespace_ix,
+                       &elem->data.element.name)) return false;
+    }
+    if(attribute) {
+        cd_xml_att_ix_t att_ix = elem->data.element.first_attribute;
+        while(att_ix != cd_xml_no_ix) {
+            assert(att_ix < N);
+            cd_xml_attribute_t* att = &doc->attributes[att_ix];
+            attribute(userdata, doc, att->ns, &att->name, &att->value);
+            att_ix = att->next_attribute;
+        }
+    }
+    cd_xml_node_ix_t child_ix = elem->data.element.first_child;
+    while(child_ix != cd_xml_no_ix) {
+        assert(child_ix < M);
+        cd_xml_node_t* child = &doc->nodes[child_ix];
+        if(child->kind == CD_XML_NODE_ELEMENT) {
+            if(!cd_xml_apply_visitor_recurse(doc,
+                                             userdata,
+                                             elem_enter,
+                                             elem_exit,
+                                             attribute,
+                                             text,
+                                             child)) return false;
+        }
+        else if(child->kind == CD_XML_NODE_ELEMENT) {
+            
+        }
+        else {
+            assert(0 && "Illegal node kind");
+        }
+        child_ix = child->next_sibling;
+    }
+
+    if(elem_exit) {
+        if(!elem_exit(doc,
+                      userdata,
+                      elem->data.element.namespace_ix,
+                      &elem->data.element.name)) return false;
+    }
+
+    return true;
+}
+
+
+bool cd_xml_apply_visitor(cd_xml_doc_t*           doc,
+                          void*                   userdata,
+                          cd_xml_visit_elem_enter elem_enter,
+                          cd_xml_visit_elem_exit  elem_exit,
+                          cd_xml_visit_attribute  attribute,
+                          cd_xml_visit_text       text)
+{
+    if(doc == NULL) return false;
+    if(cd_xml_sb_size(doc->nodes) == 0) return true;
+    
+    return cd_xml_apply_visitor_recurse(doc,
+                                        userdata,
+                                        elem_enter,
+                                        elem_exit,
+                                        attribute,
+                                        text,
+                                        0);
+}
+
 
 #endif  // CD_XML_IMPLEMENTATION
 

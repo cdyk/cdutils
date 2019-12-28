@@ -50,6 +50,7 @@ typedef enum
 {
     CD_XML_STATUS_SUCCESS = 0,
     CD_XML_STATUS_POINTER_NOT_NULL,
+    CD_XML_STATUS_UNKNOWN_NAMESPACE_PREFIX,
     CD_XML_STATUS_UNSUPPORTED_VERSION,
     CD_XML_STATUS_UNSUPPORTED_ENCODING,
     CD_XML_STATUS_MALFORMED_UTF8,
@@ -810,6 +811,12 @@ static bool cd_xml_parse_attribute(cd_xml_parse_context_t* ctx)
         }
         
         cd_xml_ns_ix_t ns = cd_xml_add_namespace(ctx->doc, &name, &value);
+        
+        cd_xml_namespace_binding_t binding = {
+            .prefix = name,
+            .namespace_ix = ns
+        };
+        cd_xml_sb_push(ctx->namespace_resolve_stack, binding);
         return ns != cd_xml_no_ix;
     }
 
@@ -864,7 +871,10 @@ static bool cd_xml_parse_element_tag_start(cd_xml_parse_context_t* ctx, cd_xml_s
 
 static bool cd_xml_parse_element(cd_xml_parse_context_t* ctx, cd_xml_node_ix_t parent);
 
-static bool cd_xml_parse_element_contents(cd_xml_parse_context_t* ctx, cd_xml_stringview_t* ns, cd_xml_stringview_t* name, cd_xml_node_ix_t parent)
+static bool cd_xml_parse_element_contents(cd_xml_parse_context_t*   ctx,
+                                          cd_xml_stringview_t*      elem_namespace,
+                                          cd_xml_stringview_t*      elem_name,
+                                          cd_xml_node_ix_t          parent)
 {
     if(cd_xml_match_token(ctx, CD_XML_TOKEN_EMPTYTAG_END)) {
         // Leaf tag
@@ -885,6 +895,23 @@ static bool cd_xml_parse_element_contents(cd_xml_parse_context_t* ctx, cd_xml_st
 
         if(cd_xml_match_token(ctx, CD_XML_TOKEN_ENDTAG_START)) {
             if(!cd_xml_expect_token(ctx, CD_XML_TOKEN_NAME, "In end-tag, expected name")) return false;
+
+            cd_xml_stringview_t name = ctx->matched.text;
+            if(cd_xml_match_token(ctx, CD_XML_TOKEN_COLON)) {
+                if(!cd_xml_strvcmp(&name, elem_namespace)) {
+                    cd_xml_report_error(ctx, name.begin, name.end, "Namespace prefix mismatch");
+                    ctx->status = CD_XML_STATUS_MALFORMED_ENTITY;
+                    return false;
+                }
+                if(!cd_xml_expect_token(ctx, CD_XML_TOKEN_NAME, "Expected name after prefix")) return false;
+                name = ctx->matched.text;
+            }
+            if(!cd_xml_strvcmp(&name, elem_name)) {
+                cd_xml_report_error(ctx, name.begin, name.end, "Namespace prefix mismatch");
+                ctx->status = CD_XML_STATUS_MALFORMED_ENTITY;
+                return false;
+            }
+
             if(!cd_xml_expect_token(ctx, CD_XML_TOKEN_TAG_END, "In end-tag, expected >")) return false;
 
             if(text.begin != NULL) {
@@ -914,8 +941,8 @@ static bool cd_xml_parse_element_contents(cd_xml_parse_context_t* ctx, cd_xml_st
             ctx->status = CD_XML_STATUS_PREMATURE_EOF;
             cd_xml_report_error(ctx, tag_start, ctx->chr.text.end,
                                 "EOF while scanning for end of tag %.*s:%.*s",
-                                CD_XML_STRINGVIEW_FORMAT(*ns),
-                                CD_XML_STRINGVIEW_FORMAT(*name));
+                                CD_XML_STRINGVIEW_FORMAT(*elem_namespace),
+                                CD_XML_STRINGVIEW_FORMAT(*elem_name));
             return false;
         }
         else {
@@ -932,34 +959,60 @@ static bool cd_xml_parse_element_contents(cd_xml_parse_context_t* ctx, cd_xml_st
     return true;
 }
 
+
+static bool cd_xml_resolve_namespace(cd_xml_parse_context_t*    ctx,
+                                     cd_xml_ns_ix_t*            ns_ix,
+                                     cd_xml_stringview_t*       prefix)
+{
+    // Note: Assumption here is that the number of namespaces are pretty low (1-3),
+    // so a linear search suffices.
+    unsigned n = cd_xml_sb_size(ctx->namespace_resolve_stack);
+    for(unsigned i = n-1; i<n; i--) {
+        if(cd_xml_strvcmp(&ctx->namespace_resolve_stack[i].prefix, prefix)) {
+            *ns_ix = ctx->namespace_resolve_stack[i].namespace_ix;
+            return true;
+        }
+    }
+    ctx->status = CD_XML_STATUS_UNKNOWN_NAMESPACE_PREFIX;
+    cd_xml_report_error(ctx, prefix->begin, prefix->end, "Unable to resolve namespace prefix");
+    return false;
+}
+
 static bool cd_xml_parse_element(cd_xml_parse_context_t* ctx, cd_xml_node_ix_t parent)
 {
     cd_xml_ns_ix_t parent_default_ns = ctx->namespace_default;
     unsigned parent_bind_stack_height = cd_xml_sb_size(ctx->namespace_resolve_stack);
-    cd_xml_sb_shrink(ctx->attribute_stash, 0);
 
-    cd_xml_stringview_t ns = { NULL, NULL };
-    cd_xml_stringview_t name = ctx->matched.text;
+    cd_xml_stringview_t elem_ns = { NULL, NULL };
+    cd_xml_stringview_t elem_name = ctx->matched.text;
 
-    if(cd_xml_parse_element_tag_start(ctx, &ns, &name)) {
+    if(cd_xml_parse_element_tag_start(ctx, &elem_ns, &elem_name)) {
 
 
-        cd_xml_ns_ix_t ns_ix = cd_xml_no_ix;    // FIXME
-
-        cd_xml_node_ix_t elem_ix = cd_xml_add_element(ctx->doc, ns_ix, &name, parent);
+        cd_xml_ns_ix_t elem_ns_ix = ctx->namespace_default;
+        if(!cd_xml_strv_empty(elem_ns)) {
+            if(!cd_xml_resolve_namespace(ctx, &elem_ns_ix, &elem_ns)) return false;
+        }
+        cd_xml_node_ix_t elem_ix = cd_xml_add_element(ctx->doc, elem_ns_ix, &elem_name, parent);
 
         for(unsigned i=0; i<cd_xml_sb_size(ctx->attribute_stash); i++) {
             cd_xml_att_triple_t* att = &ctx->attribute_stash[i];
+
+            cd_xml_ns_ix_t att_ns_ix = cd_xml_no_ix;
+            if(!cd_xml_strv_empty(att->namespace)) {
+                if(!cd_xml_resolve_namespace(ctx, &att_ns_ix, &att->namespace)) return false;
+            }
+
             
             cd_xml_add_attribute(ctx->doc,
-                                 cd_xml_no_ix,  // FIXME: resolve att->ns
+                                 att_ns_ix,
                                  &att->name,
                                  &att->value,
                                  elem_ix);
         }
 
 
-        if(cd_xml_parse_element_contents(ctx, &ns, &name, elem_ix)) {
+        if(cd_xml_parse_element_contents(ctx, &elem_ns, &elem_name, elem_ix)) {
             cd_xml_sb_shrink(ctx->namespace_resolve_stack, parent_bind_stack_height);
             ctx->namespace_default = parent_default_ns;
             return true;
@@ -1272,6 +1325,23 @@ static bool cd_xml_write_element_attributes(cd_xml_doc_t*       doc,
     return true;
 }
 
+static bool cd_xml_write_element_name(cd_xml_doc_t*      doc,
+                                      cd_xml_output_func output_func,
+                                      void*              userdata,
+                                      cd_xml_node_t*     elem)
+{
+    if (elem->data.element.namespace_ix != cd_xml_no_ix) {
+        assert(elem->data.element.namespace_ix < cd_xml_sb_size(doc->namespaces));
+        cd_xml_ns_t* ns = &doc->namespaces[elem->data.element.namespace_ix];
+        if(!cd_xml_strv_empty(ns->prefix)) {    // empty -> default namespace
+            if (!output_func(userdata, CD_XML_WRITE_HELPERV(ns->prefix))) return false;
+            if (!output_func(userdata, CD_XML_WRITE_HELPER(":"))) return false;
+        }
+    }
+    if (!output_func(userdata, CD_XML_WRITE_HELPERV(elem->data.element.name))) return false;
+    return true;
+}
+
 static bool cd_xml_write_element(cd_xml_doc_t*      doc,
                                  cd_xml_output_func output_func,
                                  void*              userdata,
@@ -1292,7 +1362,8 @@ static bool cd_xml_write_element(cd_xml_doc_t*      doc,
     
     if (elem->kind == CD_XML_NODE_ELEMENT) {
         if (!output_func(userdata, "<", 1)) return false;
-        if (!output_func(userdata, CD_XML_WRITE_HELPERV(elem->data.element.name))) return false;
+
+        if(!cd_xml_write_element_name(doc, output_func, userdata, elem)) return false;
 
         if (elem_ix == 0) {
             if(!cd_xml_write_namespace_defs(doc,
@@ -1322,7 +1393,7 @@ static bool cd_xml_write_element(cd_xml_doc_t*      doc,
                                     pretty)) return false;
 
             if (!output_func(userdata, "<//", 2)) return false;
-            if (!output_func(userdata,CD_XML_WRITE_HELPERV(elem->data.element.name))) return false;
+            if(!cd_xml_write_element_name(doc, output_func, userdata, elem)) return false;
             if (!output_func(userdata, ">", 1)) return false;
         }
     }

@@ -18,7 +18,7 @@ int main(int argc, const char * argv[]) {
     {   // Namespaces
         const char* xml =
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-            "<b:quux />\n";
+            "<quux />\n";
         cd_xml_doc_t* doc = NULL;
         auto rv = cd_xml_init_and_parse(&doc, xml, std::strlen(xml));
         assert(rv == CD_XML_STATUS_SUCCESS);
@@ -39,11 +39,13 @@ int main(int argc, const char * argv[]) {
         const char* xml =
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
             "<foo xmlns='http://a.com'>\n"
-            "  <bar xmlns:b='http://b.com'>\n"
-            "    <baz xmlns:c='http://c.com'>\n"
+            "  <b:bar xmlns:b='http://b.com'>\n"
+            "    <c:baz xmlns:c='http://c.com' c:bah=''>\n"
             "     <b:quux/>\n"
-            "    </baz>\n"
-            "  </bar>\n"
+            "    </c:baz>\n"
+            "  </b:bar>\n"
+            "  <baz xmlns:c='http://b.com'>\n"
+            "  </baz>"
             "</foo>\n";
         cd_xml_doc_t* doc = NULL;
         cd_xml_parse_status_t rv = cd_xml_init_and_parse(&doc, xml, strlen(xml));

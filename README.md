@@ -3,4 +3,4 @@
 See files for documentation.
 
 ## Contents
-- `cd_xml.h`: A simple and compact XML parser.
+- [`cd_xml.h`](cd_xml.h): A simple and compact XML parser.

@@ -10,6 +10,8 @@
 #include <chrono>
 #include <cmath>
 
+#include "cd_obj.h"
+
 namespace {
     
     void error_callback(int error, const char* description)
@@ -17,6 +19,22 @@ namespace {
         std::cerr << "Error: " << description;
     }
  
+    std::string cube_obj = R"(# foo
+v -1  1  1
+v -1 -1  1
+v  1 -1  1
+v  1  1  1
+v -1  1 -1
+v -1 -1 -1
+v  1 -1 -1
+v  1  1 -1
+f 1 2 3 4
+f 8 7 6 5
+f 4 3 7 8
+f 5 1 4 8
+f 5 6 2 1
+f 2 6 7 3
+)";
     float cube_v[] = {
         -1.f, -1.f, -1.f, 1.f,
          1.f, -1.f, -1.f, 1.f,
@@ -216,6 +234,14 @@ void main() {
 
 int main(int argc, const char * argv[])
 {
+
+    cd_obj_scene_t* scene = cd_obj_parse(nullptr, nullptr, cube_obj.c_str(), cube_obj.length());
+    if(scene == nullptr) {
+        std::cerr << "Error loading obj file.\n";
+        return -1;
+    }
+
+#if 0
     if(!glfwInit()) {
         return -1;
     }
@@ -244,5 +270,6 @@ int main(int argc, const char * argv[])
     }
 
     glfwTerminate();
+#endif
     return 0;
 }

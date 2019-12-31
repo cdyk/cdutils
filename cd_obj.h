@@ -33,11 +33,17 @@ cd_obj_scene_t* cd_obj_parse(void*                  userdata,
 #include <assert.h>
 #include <math.h>
 
+#define CD_OBJ_MALLOC(ctx, size) malloc(size)
+#define CD_OBJ_FREE(ctx, ptr) free(ptr)
 #define CD_OBJ_LOG_ERROR(ctx,...) do { fprintf(stderr,__VA_ARGS__); fputc('\n',stderr); } while(0)
 
 typedef struct {
-    float x, y, z;
+    float p[3];
 } cd_obj_vec3f_t;
+
+typedef struct {
+    float p[2];
+} cd_obj_vec2f_t;
 
 typedef struct
 {
@@ -65,41 +71,53 @@ typedef struct cd_obj_object_t
 
 
 #define CD_OBJ_BLOCK_SIZE 1024
-#define CD_OBJ_DECLARE_BLOCK(type,name)  \
-typedef struct cd_obj_block_##name   \
-{                                   \
-  struct cd_obj_block##name* next;  \
-  unsigned fill;                    \
-  type data[CD_OBJ_BLOCK_SIZE];     \
-} cd_obj_block_##name;
+
+#define CD_OBJ_DECLARE_BLOCK(name)          \
+typedef struct cd_obj_block_##name          \
+{                                           \
+    struct cd_obj_block_##name* next;       \
+    cd_obj_##name data[CD_OBJ_BLOCK_SIZE];  \
+} cd_obj_block_##name;                      \
+typedef struct                              \
+{                                           \
+    cd_obj_block_##name* first;             \
+    cd_obj_block_##name* last;              \
+    unsigned fill;                          \
+    unsigned N;                             \
+} cd_obj_block_head_##name;
+
+#define CD_OBJ_MAKE_ROOM(head,name)                                             \
+if((head).last == NULL || CD_OBJ_BLOCK_SIZE <= (head).fill + 1) {               \
+    cd_obj_block_##name* b = CD_OBJ_MALLOC(ctx, sizeof(cd_obj_block_##name));   \
+    (head).fill = 0;                                                            \
+    b->next = NULL;                                                             \
+    if((head).last == NULL) {                                                   \
+        (head).first = b;                                                       \
+        (head).last = b;                                                        \
+    }                                                                           \
+    else {                                                                      \
+        (head).last->next = b;                                                  \
+        (head).last = b;                                                        \
+    }                                                                           \
+}
 
 
-CD_OBJ_DECLARE_BLOCK(cd_obj_vec3f_t,vec3f_t)
-CD_OBJ_DECLARE_BLOCK(cd_obj_tri_t,tri_t)
-CD_OBJ_DECLARE_BLOCK(cd_obj_line_t,line_t)
+CD_OBJ_DECLARE_BLOCK(vec3f_t)
+CD_OBJ_DECLARE_BLOCK(vec2f_t)
+CD_OBJ_DECLARE_BLOCK(tri_t)
+CD_OBJ_DECLARE_BLOCK(line_t)
+CD_OBJ_DECLARE_BLOCK(object_t)
 
 
 
 typedef struct
 {
-    struct {
-        cd_obj_block_vec3f_t* first, last;
-    } vertices;
-    struct {
-        cd_obj_block_vec3f_t* first, last;
-    } normals;
-    struct {
-        cd_obj_block_vec3f_t* first, last;
-    } texcoords;
-    struct {
-        cd_obj_block_tri_t* first, last;
-    } triangles;
-    struct {
-        cd_obj_block_tri_t* first, last;
-    } lines;
-    struct {
-        cd_obj_object_t* first, last;
-    } objects;
+    cd_obj_block_head_vec3f_t   vertices;
+    cd_obj_block_head_vec3f_t   normals;
+    cd_obj_block_head_vec2f_t   texcoords;
+    cd_obj_block_head_tri_t     triangles;
+    cd_obj_block_head_line_t    lines;
+    cd_obj_block_head_object_t  objects;
 
     uint32_t line;
     uint32_t currentObject;
@@ -112,12 +130,6 @@ typedef struct
   Arena arena;
   StringInterning strings;
 #endif
-    uint32_t vertices_n;
-    uint32_t normals_n;
-    uint32_t texcoords_n;
-    uint32_t triangles_n;
-    uint32_t lines_n;
-    uint32_t objects_n;
 
     void* userdata;
     cd_obj_mtllib_handler mtllib_handler;
@@ -131,6 +143,8 @@ typedef struct
 } cd_obj_context;
 
 
+#define CD_OBJ_SKIP_WHITESPACE(ctx) while((ctx)->ptr < (ctx)->end && (*(ctx)->ptr == ' ' || *(ctx)->ptr == '\t')) (ctx)->ptr++
+
 static const bool cd_obj_parse_int(cd_obj_context* ctx, int32_t* value)
 {
     int32_t sign = 1;
@@ -138,8 +152,12 @@ static const bool cd_obj_parse_int(cd_obj_context* ctx, int32_t* value)
         if (*ctx->ptr == '-') { sign = -1; ctx->ptr++; }
         else if (*ctx->ptr == '+') ctx->ptr++;
     }
+    if(ctx->end <= ctx->ptr || *ctx->ptr < '0' || '9' < *ctx->ptr) {
+        CD_OBJ_LOG_ERROR(ctx, "Failed to find first digit of int at line %u", ctx->line);
+        return false;
+    }
     
-    int64_t t = 0;
+    int64_t t = *ctx->ptr - '0';
     for (; ctx->ptr < ctx->end && '0' <= *ctx->ptr && *ctx->ptr <= '9'; ctx->ptr++) {
         if (t < 0x100000000) {
             t = 10 * t + (*ctx->ptr - '0');
@@ -183,10 +201,12 @@ static const bool cd_obj_parse_float(cd_obj_context* ctx, float* value)
         if (*ctx->ptr == '-') { sign = -1; ctx->ptr++; }
         else if (*ctx->ptr == '+') ctx->ptr++;
     }
-    
+
+    bool anything = false;
     int32_t mantissa = 0;
     int32_t exponent = 0;
     for (; ctx->ptr < ctx->end && '0' <= *ctx->ptr && *ctx->ptr <= '9'; ctx->ptr++) {
+        anything = true;
         if (mantissa < 100000000) {
             mantissa = 10 * mantissa + (*ctx->ptr - '0');
         }
@@ -197,6 +217,7 @@ static const bool cd_obj_parse_float(cd_obj_context* ctx, float* value)
     if (ctx->ptr < ctx->end && *ctx->ptr == '.') {
         ctx->ptr++;
         for (; ctx->ptr < ctx->end && '0' <= *ctx->ptr && *ctx->ptr <= '9'; ctx->ptr++) {
+            anything = true;
             if (mantissa < 100000000) {
                 mantissa = 10 * mantissa + (*ctx->ptr - '0');
                 exponent--;
@@ -213,6 +234,7 @@ static const bool cd_obj_parse_float(cd_obj_context* ctx, float* value)
         
         int32_t exp = 0;
         for (; ctx->ptr < ctx->end && '0' <= *ctx->ptr && *ctx->ptr <= '9'; ctx->ptr++) {
+            anything = true;
             if (exp < 100000000) {
                 exp = 10 * exp + (*ctx->ptr - '0');
             }
@@ -220,18 +242,162 @@ static const bool cd_obj_parse_float(cd_obj_context* ctx, float* value)
         
         exponent += expSign * exp;
     }
+    if(!anything) {
+        CD_OBJ_LOG_ERROR(ctx, "Failed to parse float at line %u.", ctx->line);
+        return false;
+    }
+    
     *value = (float)(sign*mantissa)*powf(10.f, exponent);
     return true;
 }
 
-
-inline void cd_obj_skip_whitespace(cd_obj_context* ctx)
+bool cd_obj_parse_vec3f(cd_obj_context* ctx,
+                        cd_obj_block_head_vec3f_t* head)
 {
-    while (ctx->ptr < ctx->end) {
-        char v = *ctx->ptr;
-        if(!(v =='\r' || v == ' ' || v == '\f' || v == '\t' || v == '\v')) return;
-        ctx->ptr++;
+    CD_OBJ_MAKE_ROOM(*head, vec3f_t);
+    cd_obj_vec3f_t* v = &head->last->data[head->fill];
+    for(size_t i=0; i<3; i++) {
+        CD_OBJ_SKIP_WHITESPACE(ctx);
+        if(!cd_obj_parse_float(ctx, &v->p[i])) return false;
     }
+    head->fill++;
+    head->N++;
+    return true;
+}
+
+bool cd_obj_parse_vec2f(cd_obj_context* ctx,
+                        cd_obj_block_head_vec2f_t* head)
+{
+    CD_OBJ_MAKE_ROOM(*head, vec2f_t);
+    cd_obj_vec2f_t* v = &head->last->data[head->fill];
+    for(size_t i=0; i<2; i++) {
+        CD_OBJ_SKIP_WHITESPACE(ctx);
+        if(!cd_obj_parse_float(ctx, &v->p[i])) return false;
+    }
+    head->fill++;
+    head->N++;
+    return true;
+}
+
+static bool cd_obj_parse_index_tuple(cd_obj_context* ctx, uint32_t* triple)
+{
+    int32_t t;
+    triple[1] = (uint32_t)-1;
+    triple[2] = (uint32_t)-1;
+
+    CD_OBJ_SKIP_WHITESPACE(ctx);
+    if(!cd_obj_parse_int(ctx, &t)) return false;
+    triple[0] = t < 0 ? (uint32_t)(t + ctx->vertices.N) : (uint32_t)(t - 1);
+    if(ctx->vertices.N <= triple[0]) {
+        CD_OBJ_LOG_ERROR(ctx, "Illegal vertex index %d at line %u.", t, ctx->line);
+        return false;
+    }
+
+    if(ctx->ptr < ctx->end && *ctx->ptr == '/') {
+        ctx->ptr++;
+        if(ctx->ptr < ctx->end && !(*ctx->ptr == '/' || *ctx->ptr == ' ' || *ctx->ptr == '\t')) {
+            if(!cd_obj_parse_int(ctx, &t)) return false;
+            triple[1] = t < 0 ? (uint32_t)(t + ctx->texcoords.N) : (uint32_t)(t - 1);
+            if(ctx->texcoords.N <= triple[1]) {
+                CD_OBJ_LOG_ERROR(ctx, "Illegal texcoord index %d at line %u.", t, ctx->line);
+                return false;
+            }
+        }
+
+        if(ctx->ptr < ctx->end && *ctx->ptr == '/') {
+            ctx->ptr++;
+            if(ctx->ptr < ctx->end && !(*ctx->ptr == ' ' || *ctx->ptr == '\t')) {
+                if(!cd_obj_parse_int(ctx, &t)) return false;
+                triple[2] = t < 0 ? (uint32_t)(t + ctx->normals.N) : (uint32_t)(t - 1);
+                if(ctx->normals.N <= triple[2]) {
+                    CD_OBJ_LOG_ERROR(ctx, "Illegal normal index %d at line %u.", t, ctx->line);
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+static bool cd_obj_parse_f(cd_obj_context* ctx)
+{
+    cd_obj_tri_t t;
+    t.smoothingGroup = ctx->currentSmoothingGroup;
+    t.object = ctx->currentObject;
+    t.color = ctx->currentColor;
+    
+    unsigned k = 0;
+    for (; k < 3; k++) {
+        CD_OBJ_SKIP_WHITESPACE(ctx);
+        if(ctx->end <= ctx->begin || *ctx->begin == '\r'|| *ctx->begin == '\r') {
+            CD_OBJ_LOG_ERROR(ctx, "Polygon face with less than three corners on line %u", ctx->line);
+            return false;
+        }
+        uint32_t tuple[3];
+        if(!cd_obj_parse_index_tuple(ctx, tuple)) return false;
+        t.vtx[k] = tuple[0];
+        t.tex[k] = tuple[1];
+        t.nrm[k] = tuple[2];
+    }
+    CD_OBJ_MAKE_ROOM(ctx->triangles, tri_t);
+    ctx->triangles.last->data[ctx->triangles.fill++] = t;
+    ctx->triangles.N++;
+
+    while (true) {
+        CD_OBJ_SKIP_WHITESPACE(ctx);
+        if(ctx->end <= ctx->begin || *ctx->begin == '\r'|| *ctx->begin == '\r') return true;
+
+        uint32_t tuple[3];
+        if(!cd_obj_parse_index_tuple(ctx, tuple)) return false;
+
+        cd_obj_tri_t r;
+        r.smoothingGroup = ctx->currentSmoothingGroup;
+        r.object = ctx->currentObject;
+        r.color = ctx->currentColor;
+
+        r.vtx[0] = t.vtx[0];
+        r.tex[0] = t.tex[0];
+        r.nrm[0] = t.nrm[0];
+        r.vtx[1] = t.vtx[2];
+        r.tex[1] = t.tex[2];
+        r.nrm[1] = t.nrm[2];
+        r.vtx[2] = tuple[0];
+        r.tex[2] = tuple[1];
+        r.nrm[2] = tuple[2];
+
+        CD_OBJ_MAKE_ROOM(ctx->triangles, tri_t);
+        ctx->triangles.last->data[ctx->triangles.fill++] = r;
+        ctx->triangles.N++;
+        t = r;
+    }
+}
+
+static bool cd_obj_parse_l(cd_obj_context* ctx)
+{
+    cd_obj_line_t l;
+    l.object = ctx->currentObject;
+    l.color = ctx->currentColor;
+    
+    unsigned k = 0;
+    for (; k < 2; k++) {
+        CD_OBJ_SKIP_WHITESPACE(ctx);
+        if(ctx->end <= ctx->begin || *ctx->begin == '\r'|| *ctx->begin == '\r') {
+            CD_OBJ_LOG_ERROR(ctx, "Line with less than two vertices on line %u", ctx->line);
+            return false;
+        }
+        int32_t t;
+        if(!cd_obj_parse_int(ctx, &t)) return false;
+
+        l.vtx[k] = t < 0 ? (uint32_t)(t + ctx->vertices.N) : (uint32_t)(t - 1);
+        if(ctx->vertices.N <= l.vtx[k]) {
+            CD_OBJ_LOG_ERROR(ctx, "Illegal vertex index %d at line %u.", t, ctx->line);
+            return false;
+        }
+    }
+    CD_OBJ_MAKE_ROOM(ctx->lines, line_t);
+    ctx->lines.last->data[ctx->lines.fill++] = l;
+    ctx->lines.N++;
+    return true;
 }
 
 
@@ -239,8 +405,8 @@ inline void cd_obj_skip_whitespace(cd_obj_context* ctx)
 
 static bool cd_obj_parse_loop(cd_obj_context* ctx)
 {
-    cd_obj_skip_whitespace(ctx);
     while(ctx->ptr < ctx->end) {
+        CD_OBJ_SKIP_WHITESPACE(ctx);
         const char* b = ctx->ptr;
 
         bool recognized = false;
@@ -324,7 +490,6 @@ static bool cd_obj_parse_loop(cd_obj_context* ctx)
             if(*ctx->ptr++ == '\n') break;
         }
         ctx->line++;
-        cd_obj_skip_whitespace(ctx);
         assert(b < ctx->ptr && "No progress");
     }
     return true;
@@ -531,199 +696,6 @@ cd_obj_scene_t* cd_obj_parse(void*                  userdata,
 
 namespace {
 
-
-
-
-
-  const char* endOfine(const char* p, const char* end)
-  {
-    while (p < end && (*p != '#' && *p != '\n' && *p != '\r'))  p++;
-    return p;
-  }
-
-  const char* skipNewLine(const char* p, const char* end)
-  {
-    if (p < end && *p == '#') {
-      while (p < end && (*p != '\n' && *p != '\r'))  p++;
-    }
-    if (p < end && (*p == '\r'))  p++;
-    if (p < end && (*p == '\n'))  p++;
-    return p;
-  }
-
-  const char* skipSpacing(const char* p, const char* end)
-  {
-    while (p < end && (*p=='\r' || *p == ' ' || *p == '\f' || *p == '\t' || *p == '\v')) p++;
-    return p;
-  }
-
-  const char* skipNonSpacing(const char* p, const char* end)
-  {
-    while (p < end && (*p != '\r' && *p != ' ' && *p != '\f' && *p != '\t' && *p != '\v')) p++;
-    return p;
-  }
-
-  
-
-
-
-
-  template<unsigned d, typename Element>
-  void parseVec(Context* context, ListHeader<Block<Element>>& V, uint32_t& N,  const char * a, const char* b)
-  {
-    if (V.empty() || V.last->capacity <= V.last->fill + 1) {
-      V.append(context->arena.alloc<Block<Element>>());
-    }
-    assert(V.last->fill < V.last->capacity);
-    auto * v = V.last->data[V.last->fill++].data;
-    unsigned i = 0;
-    for (; a < b && i < d; i++) {
-      a = skipSpacing(a, b);
-      auto * q = a;
-      a = parseFloat(context, v[i], a, b);
-    }
-    for (; i < d; i++) v[i] = 0.f;
-    N++;
-  }
-
-  const char* parseIndex(Context* context, uint32_t& vi, uint32_t& ti, uint32_t& ni, const char* a, const char* b)
-  {
-    ti = ~0u;
-    ni = ~0u;
-
-    int ix;
-    a = skipSpacing(a, b);
-    a = parseInt(context, ix, a, b);
-    if (ix < 0) ix += context->vertices_n;
-    else --ix;
-    if (ix < 0 || context->vertices_n <= uint32_t(ix)) {
-      context->logger(2, "Illegal vertex index %d at line %d.", ix, context->line);
-      return a;
-    }
-    vi = ix;
-
-    if (a < b && *a == '/') {
-      a++;
-      if (a < b && *a != '/' && *a != ' ') {
-        a = parseInt(context, ix, a, b);
-        if (ix < 0) ix += context->texcoords_n;
-        else --ix;
-        if (ix < 0 || context->texcoords_n <= uint32_t(ix)) {
-          context->logger(2, "Illegal texcoord index %d at line %d.", ix, context->line);
-          return a;
-        }
-        ti = ix;
-        context->useTexcoords = true;
-      }
-      if (a < b && *a == '/' && *a != ' ') {
-        a++;
-        a = parseInt(context, ix, a, b);
-        if (ix < 0) ix += context->normals_n;
-        else --ix;
-        if (ix < 0 || context->normals_n <= uint32_t(ix)) {
-          context->logger(2, "Illegal normal index %d at line %d.", ix, context->line);
-          return a;
-        }
-        ni = ix;
-        context->useNormals = true;
-      }
-    }
-    return a;
-  }
-
-  void parseF(Context* context, const char* a, const char* b)
-  {
-    Triangle t;
-    t.smoothingGroup = context->currentSmoothingGroup;
-    t.object = context->currentObject;
-    t.color = context->currentColor;
-
-    unsigned k = 0;
-    for (; a < b && k < 3; k++) {
-      uint32_t vi, ti, ni;
-      a = parseIndex(context, vi, ti, ni, a, b);
-      t.vtx[k] = vi;
-      t.tex[k] = ti;
-      t.nrm[k] = ni;
-    }
-    if (k == 3) {
-      auto & T = context->triangles;
-      if(T.empty() || T.last->capacity <= T.last->fill + 1) {
-        T.append(context->arena.alloc<Block<Triangle>>());
-      }
-      T.last->data[T.last->fill++] = t;
-      context->triangles_n++;
-    }
-    else {
-      context->logger(2, "Skipped malformed triangle at line %d", context->line);
-    }
-
-    while (true) {
-      a = skipSpacing(a, b);
-      if (a < b && (('0' <= *a && *a <= '9') || *a == '-' || *a == '+')) {
-        uint32_t vi, ti, ni;
-        a = parseIndex(context, vi, ti, ni, a, b);
-
-        Triangle r;
-        r.smoothingGroup = context->currentSmoothingGroup;
-        r.object = context->currentObject;
-        r.color = context->currentColor;
-
-        r.vtx[0] = t.vtx[0];
-        r.tex[0] = t.tex[0];
-        r.nrm[0] = t.nrm[0];
-        r.vtx[1] = t.vtx[2];
-        r.tex[1] = t.tex[2];
-        r.nrm[1] = t.nrm[2];
-        r.vtx[2] = vi;
-        r.tex[2] = ti;
-        r.nrm[2] = ni;
-        auto & T = context->triangles;
-        if (T.empty() || T.last->capacity <= T.last->fill + 1) {
-          T.append(context->arena.alloc<Block<Triangle>>());
-        }
-        T.last->data[T.last->fill++] = r;
-        context->triangles_n++;
-        t = r;
-      }
-      else {
-        break;
-      }
-    }
-  }
-
-  void parseL(Context* context, const char* a, const char* b)
-  {
-    int ix;
-
-    Line l;
-    l.object = context->currentObject;
-    l.color = context->currentColor;
-
-    unsigned k = 0;
-    for (; a < b && k < 2; k++) {
-      a = skipSpacing(a, b);
-      a = parseInt(context, ix, a, b);
-      if (ix < 0) ix += context->vertices_n;
-      else --ix;
-      if (ix < 0 || context->vertices_n <= uint32_t(ix)) {
-        context->logger(2, "Illegal vertex index %d at line %d.", ix, context->line);
-        return;
-      }
-      l.vtx[k] = ix;
-    }
-    if (k == 2) {
-      auto & T = context->lines;
-      if (T.empty() || T.last->capacity <= T.last->fill + 1) {
-        T.append(context->arena.alloc<Block<Line>>());
-      }
-      T.last->data[T.last->fill++] = l;
-      context->lines_n++;
-    }
-    else {
-      context->logger(2, "Skipped malformed line at line %d", context->line);
-    }
-  }
 
 
   void parseS(Context* context, const char* a, const char* b)

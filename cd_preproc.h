@@ -7,6 +7,7 @@ extern "C" {
 #endif
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 typedef enum {
     CD_PP_LOGLEVEL_DEBUG,
@@ -15,6 +16,11 @@ typedef enum {
 } cd_pp_loglevel_t;
 
 typedef void (*cd_pp_log_func_t)(void* log_data, cd_pp_loglevel_t level, const char* msg, ...);
+
+typedef struct {
+    const char* begin;
+    const char* end;
+} cd_pp_strview_t;
 
 typedef struct {
     size_t*             keys;
@@ -44,13 +50,19 @@ typedef struct {
     cd_pp_arena_t       str_mem;
 } cd_pp_state_t;
 
-const char* cd_pp_str_intern(cd_pp_state_t* state, const char* begin, const char* end);
+typedef bool (*cd_pp_handle_include_t)(void* handler_data, cd_pp_state_t* state, cd_pp_strview_t path);
+
+const char* cd_pp_str_intern(cd_pp_state_t* state, cd_pp_strview_t str);
+
+bool cd_pp_process(cd_pp_state_t*           state,
+                   cd_pp_strview_t          input,
+                   cd_pp_handle_include_t   handle_include,
+                   void*                    handle_data);
 
 void cd_pp_state_free(cd_pp_state_t* state);
 
 #ifdef CD_PREPROC_IMPLEMENTATION
 #include <assert.h>
-#include <stdbool.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -63,21 +75,78 @@ void cd_pp_state_free(cd_pp_state_t* state);
 #define CD_PP_LOG_WARN(state, ...) CD_PP_LOG_WRAP(state, CD_PP_LOGLEVEL_WARN, __VA_ARGS__)
 #define CD_PP_LOG_ERROR(state, ...) CD_PP_LOG_WRAP(state, CD_PP_LOGLEVEL_ERROR, __VA_ARGS__)
 
-void* cd_pp_malloc(size_t size)
+
+typedef enum {
+    CD_PP_TOKEN_EOF         = 0,
+    CD_PP_TOKEN_LASTCHAR    = 127,
+    CD_PP_TOKEN_NEWLINE
+} cd_pp_token_kind_t;
+
+typedef struct {
+    cd_pp_strview_t     text;
+    cd_pp_token_kind_t  kind;
+} cd_pp_token_t;
+
+typedef struct {
+    cd_pp_state_t*      state;
+    cd_pp_strview_t     input;
+    cd_pp_token_t       current;
+    cd_pp_token_t       matched;
+} cd_pp_ctx_t;
+
+static bool cd_pp_isspace(char c)
+{
+    switch(c) {
+    case ' ': case '\t': case '\v': case '\f': case '\r':
+        return true;
+        break;
+    default:
+        return false;
+    }
+}
+
+static bool cd_pp_next_token(cd_pp_ctx_t* ctx)
+{
+    ctx->matched = ctx->current;
+start:
+    if(ctx->input.end <= ctx->input.begin) {
+        ctx->current.text = (cd_pp_strview_t){0,0};
+        ctx->current.kind = CD_PP_TOKEN_EOF;
+        return true;
+    }
+    ctx->current.text.begin = ctx->input.begin;
+    switch(*ctx->input.begin++) {
+    case ' ': case '\t': case '\v': case '\f': case '\r':
+        while (cd_pp_isspace(*ctx->input.begin)) {
+            ctx->input.begin++;
+        }
+        goto start;
+    case '\n':
+        ctx->current.kind = CD_PP_TOKEN_NEWLINE;
+        break;
+    default:
+        ctx->current.kind = (cd_pp_token_kind_t)ctx->input.begin[-1];
+        break;
+    }
+    ctx->current.text.end = ctx->input.begin;
+    return true;
+}
+
+static void* cd_pp_malloc(size_t size)
 {
     void* rv = malloc(size);
     assert(rv != NULL);
     return rv;
 }
 
-void* cd_pp_calloc(size_t num, size_t size)
+static void* cd_pp_calloc(size_t num, size_t size)
 {
     void* rv = calloc(num, size);
     assert(rv != NULL);
     return rv;
 }
 
-void* cd_pp_arena_alloc(cd_pp_state_t* state, cd_pp_arena_t* arena, size_t bytes)
+static void* cd_pp_arena_alloc(cd_pp_state_t* state, cd_pp_arena_t* arena, size_t bytes)
 {
     if(bytes == 0) return NULL;
     
@@ -109,7 +178,7 @@ void* cd_pp_arena_alloc(cd_pp_state_t* state, cd_pp_arena_t* arena, size_t bytes
     return rv;
 }
 
-void cd_pp_arena_free(cd_pp_arena_t* arena)
+static void cd_pp_arena_free(cd_pp_arena_t* arena)
 {
     uint8_t* page = arena->first;
     while(page != NULL) {
@@ -120,14 +189,14 @@ void cd_pp_arena_free(cd_pp_arena_t* arena)
     *arena = (cd_pp_arena_t){0};
 }
 
-size_t cd_pp_hash_size_t(size_t value)
+static size_t cd_pp_hash_size_t(size_t value)
 {
     value *= 0xff51afd7ed558ccd;
     value ^= value >> 32;
     return value;
 }
 
-size_t cd_pp_map_get(const cd_pp_map_t* map, size_t key)
+static size_t cd_pp_map_get(const cd_pp_map_t* map, size_t key)
 {
     assert(key != 0);
     if(map->fill == 0) return 0;
@@ -144,7 +213,7 @@ size_t cd_pp_map_get(const cd_pp_map_t* map, size_t key)
     }
 }
 
-void cd_pp_map_insert(cd_pp_map_t* map, size_t key, size_t val)
+static void cd_pp_map_insert(cd_pp_map_t* map, size_t key, size_t val)
 {
     assert(key != 0);                       // 0 is used to tag empty
     assert(val != 0);                       // zero val is used for not found
@@ -179,14 +248,14 @@ void cd_pp_map_insert(cd_pp_map_t* map, size_t key, size_t val)
     }
 }
 
-void cd_pp_map_free(cd_pp_map_t* map)
+static void cd_pp_map_free(cd_pp_map_t* map)
 {
     free(map->keys);
     free(map->vals);
     *map = (cd_pp_map_t){0};
 }
 
-size_t cd_pp_fnv_1a(const char* begin, const char* end)
+static size_t cd_pp_fnv_1a(const char* begin, const char* end)
 {
     assert(begin <= end);
     if(sizeof(size_t) == sizeof(uint32_t)) {
@@ -207,22 +276,22 @@ size_t cd_pp_fnv_1a(const char* begin, const char* end)
     }
 }
 
-const char* cd_pp_str_intern(cd_pp_state_t* state, const char* begin, const char* end)
+const char* cd_pp_str_intern(cd_pp_state_t* state, cd_pp_strview_t str)
 {
     assert(state);
-    assert(begin <= end);
-    if(begin == NULL || begin == end) {
+    assert(str.begin <= str.end);
+    if(str.begin == NULL || str.begin == str.end) {
         return NULL;
     }
-    size_t length = end - begin;
+    size_t length = str.end - str.begin;
 
-    uint64_t hash = cd_pp_fnv_1a(begin, end);
+    uint64_t hash = cd_pp_fnv_1a(str.begin, str.end);
     hash = hash ? hash : 1; // hash should never be zero
     
     cd_pp_str_item_t* item = (cd_pp_str_item_t*)cd_pp_map_get(&state->str_map, hash);
     for(cd_pp_str_item_t* i = item; i != NULL; i = i->next) {
         if(i->length == length) {
-            if(strncmp(i->str, begin, length)==0) {
+            if(strncmp(i->str, str.begin, length)==0) {
                 return i->str;
             }
         }
@@ -231,7 +300,7 @@ const char* cd_pp_str_intern(cd_pp_state_t* state, const char* begin, const char
     cd_pp_str_item_t* new_item = (cd_pp_str_item_t*)cd_pp_arena_alloc(state, &state->str_mem, sizeof(cd_pp_str_item_t) + length + 1);
     new_item->next = item;
     new_item->length = length;
-    memcpy(new_item->str, begin, length);
+    memcpy(new_item->str, str.begin, length);
     new_item->str[length] = '\0';
     cd_pp_map_insert(&state->str_map, hash, (size_t)new_item);
     return new_item->str;
@@ -243,6 +312,26 @@ void cd_pp_state_free(cd_pp_state_t* state)
     cd_pp_arena_free(&state->str_mem);
 }
 
+bool cd_pp_process(cd_pp_state_t*           state,
+                   cd_pp_strview_t          input,
+                   cd_pp_handle_include_t   handle_include,
+                   void*                    handle_data)
+{
+    cd_pp_ctx_t ctx = {
+        .state = state,
+        .input = input
+    };
+
+    while(cd_pp_next_token(&ctx) && ctx.current.kind != CD_PP_TOKEN_EOF) {
+        
+        CD_PP_LOG_DEBUG(state,
+                        "token kind=%u '%.*s'",
+                        ctx.current.kind,
+                        (int)(ctx.current.text.end-ctx.current.text.begin),
+                        ctx.current.text.begin);
+    }
+    return true;
+}
 
 
 #endif // of CD_PREPROC_IMPLEMENTATION

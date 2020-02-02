@@ -10,11 +10,11 @@ extern "C" {
 
 typedef enum {
     CD_PP_LOGLEVEL_DEBUG,
-    CD_PP_LOGLEVEL_WARNING,
+    CD_PP_LOGLEVEL_WARN,
     CD_PP_LOGLEVEL_ERROR
 } cd_pp_loglevel_t;
 
-typedef void (*cd_pp_log_func_t)(void* log_data, cd_pp_loglevel_t level, const char* msg);
+typedef void (*cd_pp_log_func_t)(void* log_data, cd_pp_loglevel_t level, const char* msg, ...);
 
 typedef struct {
     size_t*             keys;
@@ -54,6 +54,15 @@ void cd_pp_state_free(cd_pp_state_t* state);
 #include <string.h>
 #include <stdlib.h>
 
+#define CD_PP_LOG_WRAP(state, level, ...) do {                  \
+    if(state->log_func) {                                       \
+        state->log_func(state->log_data, level, __VA_ARGS__);   \
+    }                                                           \
+} while(0)
+#define CD_PP_LOG_DEBUG(state, ...) CD_PP_LOG_WRAP(state, CD_PP_LOGLEVEL_DEBUG, __VA_ARGS__)
+#define CD_PP_LOG_WARN(state, ...) CD_PP_LOG_WRAP(state, CD_PP_LOGLEVEL_WARN, __VA_ARGS__)
+#define CD_PP_LOG_ERROR(state, ...) CD_PP_LOG_WRAP(state, CD_PP_LOGLEVEL_ERROR, __VA_ARGS__)
+
 void* cd_pp_malloc(size_t size)
 {
     void* rv = malloc(size);
@@ -88,6 +97,7 @@ void* cd_pp_arena_alloc(cd_pp_state_t* state, cd_pp_arena_t* arena, size_t bytes
             *(uint8_t**)arena->curr = page;
             arena->curr = page;
         }
+        CD_PP_LOG_DEBUG(state, "Allocated page of size %zu", arena->capacity);
     }
     
     assert(arena->first);

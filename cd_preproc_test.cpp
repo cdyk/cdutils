@@ -7,17 +7,22 @@
 namespace {
 
 
-    void log_func(void* log_data, cd_pp_loglevel_t level, const char* msg)
+    void log_func(void* log_data, cd_pp_loglevel_t level, const char* msg, ...)
     {
         assert(log_data == (void*)42);
         const char * kind = nullptr;
         switch(level) {
-        case CD_PP_LOGLEVEL_DEBUG:      kind = "[debug]"; break;
-        case CD_PP_LOGLEVEL_WARNING:    kind = "[warning]"; break;
-        case CD_PP_LOGLEVEL_ERROR:      kind = "[error]"; break;
+        case CD_PP_LOGLEVEL_DEBUG:  kind = "[debug]"; break;
+        case CD_PP_LOGLEVEL_WARN:   kind = "[warn]";  break;
+        case CD_PP_LOGLEVEL_ERROR:  kind = "[error]"; break;
         default: assert(false); return;
         }
-        fprintf(stderr, "%s %s", kind, msg);
+        fprintf(stderr, "%s ", kind);
+        va_list argp;
+        va_start(argp, msg);
+        vfprintf(stderr, msg, argp);
+        va_end(argp);
+        putc('\n', stderr);
     }
 
     cd_pp_state_t new_state()

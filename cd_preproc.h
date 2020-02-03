@@ -78,7 +78,18 @@ void cd_pp_state_free(cd_pp_state_t* state);
 
 typedef enum {
     CD_PP_TOKEN_EOF         = 0,
-    CD_PP_TOKEN_LASTCHAR    = 127,
+    CD_PP_TOKEN_LASTCHAR    = 255,
+    CD_PP_TOKEN_DIGITS,
+    CD_PP_TOKEN_IDENTIFIER,
+    CD_PP_TOKEN_AND,
+    CD_PP_TOKEN_OR,
+    CD_PP_TOKEN_LESS_EQUAL,
+    CD_PP_TOKEN_GREATER_EQUAL,
+    CD_PP_TOKEN_EQUAL,
+    CD_PP_TOKEN_NOT_EQUAL,
+    CD_PP_TOKEN_SHIFT_LEFT,
+    CD_PP_TOKEN_SHIFT_RIGHT,
+    CD_PP_TOKEN_CONCAT,
     CD_PP_TOKEN_NEWLINE
 } cd_pp_token_kind_t;
 
@@ -117,17 +128,141 @@ start:
     ctx->current.text.begin = ctx->input.begin;
     switch(*ctx->input.begin++) {
     case ' ': case '\t': case '\v': case '\f': case '\r':
-        while (cd_pp_isspace(*ctx->input.begin)) {
+        while (ctx->input.begin < ctx->input.end && (*ctx->input.begin == ' '  ||
+                                                     *ctx->input.begin == '\t' ||
+                                                     *ctx->input.begin == '\v' ||
+                                                     *ctx->input.begin == '\f' ||
+                                                     *ctx->input.begin == '\r'))
+        {
             ctx->input.begin++;
         }
         goto start;
+    case '0': case '1': case '2': case '3': case '4': case '5': case '6': case '7': case '8': case '9':
+        ctx->current.kind = CD_PP_TOKEN_DIGITS;
+        while(ctx->input.begin < ctx->input.end &&
+              '0' <= *ctx->input.begin && *ctx->input.begin <= '9')
+        {
+            ctx->input.begin++;
+        }
+        break;
+    case '_': case 'a': case 'b': case 'c': case 'd': case 'e':
+    case 'f': case 'g': case 'h': case 'i': case 'j': case 'k':
+    case 'l': case 'm': case 'n': case 'o': case 'p': case 'q':
+    case 'r': case 's': case 't': case 'u': case 'v': case 'w':
+    case 'x': case 'y': case 'z': case 'A': case 'B': case 'C':
+    case 'D': case 'E': case 'F': case 'G': case 'H': case 'I':
+    case 'J': case 'K': case 'L': case 'M': case 'N': case 'O':
+    case 'P': case 'Q': case 'R': case 'S': case 'T': case 'U':
+    case 'V': case 'W': case 'X': case 'Y': case 'Z':
+        ctx->current.kind = CD_PP_TOKEN_IDENTIFIER;
+        while(ctx->input.begin < ctx->input.end &&
+              (*ctx->input.begin == '_' ||
+               ('0' <= *ctx->input.begin && *ctx->input.begin <= '9') ||
+               ('a' <= *ctx->input.begin && *ctx->input.begin <= 'Z') ||
+               ('A' <= *ctx->input.begin && *ctx->input.begin <= 'Z')))
+        {
+            ctx->input.begin++;
+        }
+        break;
+    case '/':
+        ctx->current.kind = (cd_pp_token_kind_t)ctx->input.begin[-1];
+        if(ctx->input.begin < ctx->input.end && *ctx->input.begin == '/') {
+            // single-line comment
+            do {
+                ctx->input.begin++;
+            }
+            while(ctx->input.begin < ctx->input.end && *ctx->input.begin != '\n');
+            goto start;
+        }
+        else if(ctx->input.begin < ctx->input.end && *ctx->input.begin == '*') {
+            // multi-line comment
+            ctx->input.begin++;
+            while(ctx->input.begin + 1 < ctx->input.end) {
+                if(ctx->input.begin[0] == '*' && ctx->input.begin[1] == '/') {
+                    ctx->input.begin += 2;
+                    goto start;
+                }
+                ctx->input.begin++;
+            }
+            CD_PP_LOG_ERROR(ctx->state, "EOF encountered while scanning for en of /* */");
+            return false;
+        }
+        break;
+    case '"':
+        while(ctx->input.begin < ctx->input.end) {
+            if(*ctx->input.begin++ == '"') goto done;
+        }
+        CD_PP_LOG_ERROR(ctx->state, "EOF encountered while scanning for end of \"...\"");
+        return false;
+        break;
     case '\n':
         ctx->current.kind = CD_PP_TOKEN_NEWLINE;
         break;
+    case '&':
+        ctx->current.kind = (cd_pp_token_kind_t)ctx->input.begin[-1];
+        if(ctx->input.begin < ctx->input.end && *ctx->input.begin == '&') {
+            ctx->current.kind = CD_PP_TOKEN_AND;
+            ctx->input.begin++;
+        }
+        break;
+    case '|':
+        ctx->current.kind = (cd_pp_token_kind_t)ctx->input.begin[-1];
+        if(ctx->input.begin < ctx->input.end && *ctx->input.begin == '|') {
+            ctx->current.kind = CD_PP_TOKEN_OR;
+            ctx->input.begin++;
+        }
+        break;
+    case '<':
+        ctx->current.kind = (cd_pp_token_kind_t)ctx->input.begin[-1];
+        if(ctx->input.begin < ctx->input.end && *ctx->input.begin == '<') {
+            ctx->current.kind = CD_PP_TOKEN_SHIFT_LEFT;
+            ctx->input.begin++;
+        }
+        else if(ctx->input.begin < ctx->input.end && *ctx->input.begin == '=') {
+            ctx->current.kind = CD_PP_TOKEN_LESS_EQUAL;
+            ctx->input.begin++;
+        }
+        break;
+    case '>':
+        ctx->current.kind = (cd_pp_token_kind_t)ctx->input.begin[-1];
+        if(ctx->input.begin < ctx->input.end && *ctx->input.begin == '>') {
+            ctx->current.kind = CD_PP_TOKEN_SHIFT_RIGHT;
+            ctx->input.begin++;
+        }
+        else if(ctx->input.begin < ctx->input.end && *ctx->input.begin == '=') {
+            ctx->current.kind = CD_PP_TOKEN_GREATER_EQUAL;
+            ctx->input.begin++;
+        }
+        break;
+    case '=':
+        ctx->current.kind = (cd_pp_token_kind_t)ctx->input.begin[-1];
+        if(ctx->input.begin < ctx->input.end && *ctx->input.begin == '=') {
+            ctx->current.kind = CD_PP_TOKEN_EQUAL;
+            ctx->input.begin++;
+        }
+        break;
+    case '!':
+        ctx->current.kind = (cd_pp_token_kind_t)ctx->input.begin[-1];
+        if(ctx->input.begin < ctx->input.end && *ctx->input.begin == '=') {
+            ctx->current.kind = CD_PP_TOKEN_NOT_EQUAL;
+            ctx->input.begin++;
+        }
+        break;
+    case '#':
+        ctx->current.kind = (cd_pp_token_kind_t)ctx->input.begin[-1];
+        if(ctx->input.begin < ctx->input.end && *ctx->input.begin == '#') {
+            ctx->current.kind = CD_PP_TOKEN_CONCAT;
+            ctx->input.begin++;
+        }
+        break;
+
+            
+            
     default:
         ctx->current.kind = (cd_pp_token_kind_t)ctx->input.begin[-1];
         break;
     }
+done:
     ctx->current.text.end = ctx->input.begin;
     return true;
 }

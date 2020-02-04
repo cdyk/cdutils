@@ -60,7 +60,8 @@ struct cd_pp_state_t {
 };
 
 
-const char* cd_pp_str_intern(cd_pp_state_t* state, cd_pp_strview_t str);
+const char* cd_pp_strview_intern(cd_pp_state_t* state, cd_pp_strview_t str);
+const char* cd_pp_str_intern(cd_pp_state_t* state, const char*);
 
 bool cd_pp_process(cd_pp_state_t*           state,
                    cd_pp_strview_t          input);
@@ -109,6 +110,16 @@ typedef struct {
     cd_pp_strview_t     input;
     cd_pp_token_t       current;
     cd_pp_token_t       matched;
+    const char*         id_define;
+    const char*         id_include;
+    const char*         id_undef;
+    const char*         id_if;
+    const char*         id_ifdef;
+    const char*         id_ifndef;
+    const char*         id_elif;
+    const char*         id_else;
+    const char*         id_endif;
+    const char*         id_defined;
 } cd_pp_ctx_t;
 
 static bool cd_pp_isspace(char c)
@@ -273,6 +284,55 @@ done:
     return true;
 }
 
+static bool cd_pp_is_token(cd_pp_ctx_t* ctx, cd_pp_token_kind_t kind)
+{
+    return ctx->current.kind == kind;
+}
+
+static bool cd_pp_match_token(cd_pp_ctx_t* ctx, cd_pp_token_kind_t kind)
+{
+    if(cd_pp_is_token(ctx, kind)) {
+        cd_pp_next_token(ctx);
+        return true;
+    }
+    return false;
+}
+
+static bool cd_pp_expect_token(cd_pp_ctx_t* ctx, cd_pp_token_kind_t kind, const char* expectation)
+{
+    if(cd_pp_is_token(ctx, kind)) {
+        cd_pp_next_token(ctx);
+        return true;
+    }
+    CD_PP_LOG_ERROR(ctx->state, "Expected %s, got '%.*s'",
+                    expectation,
+                    (int)(ctx->current.text.end - ctx->current.text.begin),
+                    ctx->current.text.begin);
+    return false;
+}
+
+static void cd_pp_match_until_newline(cd_pp_ctx_t* ctx)
+{
+    while(ctx->current.kind != CD_PP_TOKEN_NEWLINE &&
+          ctx->current.kind != CD_PP_TOKEN_EOF)
+    {
+        cd_pp_next_token(ctx);
+    }
+}
+
+static bool cd_pp_output_line(cd_pp_ctx_t* ctx, const char* line_start, bool active)
+{
+    cd_pp_match_until_newline(ctx);
+    if(active && ctx->state->output_func) {
+        if(!ctx->state->output_func(ctx->state->output_data,
+                                    (cd_pp_strview_t){line_start, ctx->current.text.end}))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 static void* cd_pp_malloc(size_t size)
 {
     void* rv = malloc(size);
@@ -417,7 +477,7 @@ static size_t cd_pp_fnv_1a(const char* begin, const char* end)
     }
 }
 
-const char* cd_pp_str_intern(cd_pp_state_t* state, cd_pp_strview_t str)
+const char* cd_pp_strview_intern(cd_pp_state_t* state, cd_pp_strview_t str)
 {
     assert(state);
     assert(str.begin <= str.end);
@@ -447,6 +507,38 @@ const char* cd_pp_str_intern(cd_pp_state_t* state, cd_pp_strview_t str)
     return new_item->str;
 }
 
+const char* cd_pp_str_intern(cd_pp_state_t* state, const char* str)
+{
+    return cd_pp_strview_intern(state, (cd_pp_strview_t){str, str+strlen(str)});
+}
+
+
+bool cd_pp_parse_text(cd_pp_ctx_t* ctx, bool active, bool expect_eof)
+{
+    while(cd_pp_next_token(ctx)) {
+        bool forward = active;
+        const char* line_start = ctx->current.text.begin;
+        
+        if(cd_pp_match_token(ctx, (cd_pp_token_kind_t)'#')) {
+            if(!cd_pp_expect_token(ctx, CD_PP_TOKEN_IDENTIFIER, "Expected identifier after #")) return false;
+            const char* id = cd_pp_strview_intern(ctx->state, ctx->matched.text);
+            
+            
+        }
+        
+        if(!cd_pp_output_line(ctx, line_start, forward)) return false;
+        
+        if(ctx->current.kind == CD_PP_TOKEN_EOF) {
+            if(!expect_eof) {
+                CD_PP_LOG_ERROR(ctx->state, "Unexpected EOF");
+            }
+            return expect_eof;
+        }
+    }
+    return true;
+
+}
+
 void cd_pp_state_free(cd_pp_state_t* state)
 {
     cd_pp_map_free(&state->str_map);
@@ -454,24 +546,23 @@ void cd_pp_state_free(cd_pp_state_t* state)
 }
 
 bool cd_pp_process(cd_pp_state_t*           state,
-                   cd_pp_strview_t          input,
-                   cd_pp_handle_include_t   handle_include,
-                   void*                    handle_data)
+                   cd_pp_strview_t          input)
 {
     cd_pp_ctx_t ctx = {
         .state = state,
-        .input = input
+        .input = input,
+        .id_define = cd_pp_str_intern(state, "define"),
+        .id_include = cd_pp_str_intern(state, "include"),
+        .id_undef = cd_pp_str_intern(state, "undef"),
+        .id_if = cd_pp_str_intern(state, "if"),
+        .id_ifdef = cd_pp_str_intern(state, "ifdef"),
+        .id_ifndef = cd_pp_str_intern(state, "ifndef"),
+        .id_elif = cd_pp_str_intern(state, "elif"),
+        .id_else = cd_pp_str_intern(state, "else"),
+        .id_endif = cd_pp_str_intern(state, "endif"),
+        .id_defined = cd_pp_str_intern(state, "defined")
     };
-
-    while(cd_pp_next_token(&ctx) && ctx.current.kind != CD_PP_TOKEN_EOF) {
-        
-        CD_PP_LOG_DEBUG(state,
-                        "token kind=%u '%.*s'",
-                        ctx.current.kind,
-                        (int)(ctx.current.text.end-ctx.current.text.begin),
-                        ctx.current.text.begin);
-    }
-    return true;
+    return cd_pp_parse_text(&ctx, true, true);
 }
 
 

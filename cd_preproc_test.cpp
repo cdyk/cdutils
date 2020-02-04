@@ -34,19 +34,28 @@ namespace {
         if(strncmp("foo", path.begin, path.end-path.begin)) {
             std::string text = "FOO\n";
             return cd_pp_process(state,
-                                 cd_pp_strview_t{ text.c_str(), text.c_str() + text.length() },
-                                 handle_include,
-                                 (void*)43);
+                                 cd_pp_strview_t{ text.c_str(), text.c_str() + text.length() });
         }
         return false;
     }
 
 
-    cd_pp_state_t new_state()
+    bool output_func(void* output_data, cd_pp_strview_t output)
+    {
+        std::string& str = *(std::string*)output_data;
+        str.append(output.begin, output.end);
+        return true;
+    }
+
+    cd_pp_state_t new_state(std::string& str)
     {
         cd_pp_state_t pp_state{0};
         pp_state.log_func = log_func;
         pp_state.log_data = (void*)42;
+        pp_state.handle_include = handle_include;
+        pp_state.handle_data = (void*)43;
+        pp_state.output_func = output_func;
+        pp_state.output_data = &str;
         return pp_state;
     }
 
@@ -56,7 +65,8 @@ namespace {
 int main(int argc, const char * argv[]) {
     
     {   // Check interning
-        cd_pp_state_t pp_state = new_state();
+        std::string out;
+        cd_pp_state_t pp_state = new_state(out);
 
         std::vector<const char*> strings_ptr;
         std::vector<std::string> strings;
@@ -84,14 +94,14 @@ int main(int argc, const char * argv[]) {
     }
 
     {
-        cd_pp_state_t pp_state = new_state();
+        std::string out;
+        cd_pp_state_t pp_state = new_state(out);
         std::string text = "FOO BAR\n";
         bool ok = cd_pp_process(&pp_state,
-                             cd_pp_strview_t{ text.c_str(), text.c_str() + text.length() },
-                             handle_include,
-                             (void*)43);
+                             cd_pp_strview_t{ text.c_str(), text.c_str() + text.length() });
         assert(ok);
         cd_pp_state_free(&pp_state);
+        fprintf(stderr, "%.*s", int(out.size()), out.c_str());
     }
     
     fprintf(stdout, "woohoo\n");

@@ -15,12 +15,18 @@ typedef enum {
     CD_PP_LOGLEVEL_ERROR
 } cd_pp_loglevel_t;
 
-typedef void (*cd_pp_log_func_t)(void* log_data, cd_pp_loglevel_t level, const char* msg, ...);
-
 typedef struct {
     const char* begin;
     const char* end;
 } cd_pp_strview_t;
+
+typedef struct cd_pp_state_t cd_pp_state_t;
+typedef struct cd_pp_str_item_t cd_pp_str_item_t;
+
+typedef void (*cd_pp_log_func_t)(void* log_data, cd_pp_loglevel_t level, const char* msg, ...);
+typedef bool (*cd_pp_output_func_t)(void* output_data, cd_pp_strview_t output);
+typedef bool (*cd_pp_handle_include_t)(void* handler_data, cd_pp_state_t* state, cd_pp_strview_t path);
+
 
 typedef struct {
     size_t*             keys;
@@ -36,28 +42,28 @@ typedef struct {
     size_t              capacity;
 } cd_pp_arena_t;
 
-typedef struct cd_pp_str_item_t cd_pp_str_item_t;
 struct cd_pp_str_item_t {
     cd_pp_str_item_t*   next;
     size_t              length;
     char                str[0];
 };
 
-typedef struct {
-    cd_pp_log_func_t    log_func;
-    void*               log_data;
-    cd_pp_map_t         str_map;
-    cd_pp_arena_t       str_mem;
-} cd_pp_state_t;
+struct cd_pp_state_t {
+    cd_pp_log_func_t        log_func;
+    void*                   log_data;
+    cd_pp_output_func_t     output_func;
+    void*                   output_data;
+    cd_pp_handle_include_t  handle_include;
+    void*                   handle_data;
+    cd_pp_map_t             str_map;
+    cd_pp_arena_t           str_mem;
+};
 
-typedef bool (*cd_pp_handle_include_t)(void* handler_data, cd_pp_state_t* state, cd_pp_strview_t path);
 
 const char* cd_pp_str_intern(cd_pp_state_t* state, cd_pp_strview_t str);
 
 bool cd_pp_process(cd_pp_state_t*           state,
-                   cd_pp_strview_t          input,
-                   cd_pp_handle_include_t   handle_include,
-                   void*                    handle_data);
+                   cd_pp_strview_t          input);
 
 void cd_pp_state_free(cd_pp_state_t* state);
 

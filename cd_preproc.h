@@ -57,6 +57,7 @@ struct cd_pp_state_t {
     void*                   handle_data;
     cd_pp_map_t             str_map;
     cd_pp_arena_t           str_mem;
+    unsigned                recursion_depth;
 };
 
 
@@ -85,6 +86,7 @@ void cd_pp_state_free(cd_pp_state_t* state);
 
 typedef enum {
     CD_PP_TOKEN_EOF         = 0,
+    CD_PP_TOKEN_HASH        = 35,
     CD_PP_TOKEN_LASTCHAR    = 255,
     CD_PP_TOKEN_DIGITS,
     CD_PP_TOKEN_IDENTIFIER,
@@ -121,17 +123,6 @@ typedef struct {
     const char*         id_endif;
     const char*         id_defined;
 } cd_pp_ctx_t;
-
-static bool cd_pp_isspace(char c)
-{
-    switch(c) {
-    case ' ': case '\t': case '\v': case '\f': case '\r':
-        return true;
-        break;
-    default:
-        return false;
-    }
-}
 
 static bool cd_pp_next_token(cd_pp_ctx_t* ctx)
 {
@@ -175,7 +166,7 @@ start:
         while(ctx->input.begin < ctx->input.end &&
               (*ctx->input.begin == '_' ||
                ('0' <= *ctx->input.begin && *ctx->input.begin <= '9') ||
-               ('a' <= *ctx->input.begin && *ctx->input.begin <= 'Z') ||
+               ('a' <= *ctx->input.begin && *ctx->input.begin <= 'z') ||
                ('A' <= *ctx->input.begin && *ctx->input.begin <= 'Z')))
         {
             ctx->input.begin++;
@@ -516,18 +507,43 @@ const char* cd_pp_str_intern(cd_pp_state_t* state, const char* str)
 bool cd_pp_parse_text(cd_pp_ctx_t* ctx, bool active, bool expect_eof)
 {
     while(cd_pp_next_token(ctx)) {
+
         bool forward = active;
         const char* line_start = ctx->current.text.begin;
         
-        if(cd_pp_match_token(ctx, (cd_pp_token_kind_t)'#')) {
+        if(cd_pp_match_token(ctx, CD_PP_TOKEN_HASH)) {
             if(!cd_pp_expect_token(ctx, CD_PP_TOKEN_IDENTIFIER, "Expected identifier after #")) return false;
             const char* id = cd_pp_strview_intern(ctx->state, ctx->matched.text);
-            
-            
+
+            if(id == ctx->id_elif ||
+               id == ctx->id_else ||
+               id == ctx->id_endif)
+            {
+                if(expect_eof) {
+                    CD_PP_LOG_ERROR(ctx->state, "Expected EOF, got #%s", id);
+                    return false;
+                }
+                return true;
+            }
+
+            if(id == ctx->id_if) {
+                ctx->state->recursion_depth++;
+                cd_pp_parse_text(ctx, active, false);
+                ctx->state->recursion_depth--;
+                
+                if(!cd_pp_expect_token(ctx, CD_PP_TOKEN_HASH, "Expected #")) return false;
+                if(!cd_pp_expect_token(ctx, CD_PP_TOKEN_IDENTIFIER, "Expected identifier after #")) return false;
+                const char* id2 = cd_pp_strview_intern(ctx->state, ctx->matched.text);
+                if(id2 == ctx->id_endif) {
+                    
+                }
+            }
+
+            if(!cd_pp_output_line(ctx, line_start, forward)) return false;
         }
-        
-        if(!cd_pp_output_line(ctx, line_start, forward)) return false;
-        
+        else {
+            if(!cd_pp_output_line(ctx, line_start, forward)) return false;
+        }
         if(ctx->current.kind == CD_PP_TOKEN_EOF) {
             if(!expect_eof) {
                 CD_PP_LOG_ERROR(ctx->state, "Unexpected EOF");

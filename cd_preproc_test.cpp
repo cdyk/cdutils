@@ -105,8 +105,8 @@ int main(int argc, const char * argv[]) {
         cd_pp_state_free(&pp_state);
     }
 
-    run_test("", "");
-    run_test("FOO BAR\n", "");
+    //run_test("", "");
+    //run_test("FOO BAR\n", "");
     run_test("#if 1\nFOO\n#endif\n", "");
     return 0;
 }

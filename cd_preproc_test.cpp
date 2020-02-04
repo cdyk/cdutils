@@ -2,6 +2,7 @@
 #include <cassert>
 #include <vector>
 #include <string>
+#include <cstdarg>
 #include "cd_preproc.h"
 
 namespace {
@@ -33,7 +34,7 @@ namespace {
         if(strncmp("foo", path.begin, path.end-path.begin)) {
             std::string text = "FOO\n";
             return cd_pp_process(state,
-                                 (cd_pp_strview_t){ text.c_str(), text.c_str() + text.length() },
+                                 cd_pp_strview_t{ text.c_str(), text.c_str() + text.length() },
                                  handle_include,
                                  (void*)43);
         }
@@ -61,12 +62,12 @@ int main(int argc, const char * argv[]) {
         std::vector<std::string> strings;
         for(size_t i=0; i<100; i++) {
             std::string t = "abc" + std::to_string(i);
-            strings_ptr.push_back(cd_pp_str_intern(&pp_state, (cd_pp_strview_t){ t.c_str(), t.c_str()+t.length()}));
+            strings_ptr.push_back(cd_pp_str_intern(&pp_state, cd_pp_strview_t{ t.c_str(), t.c_str()+t.length()}));
             strings.emplace_back(std::move(t));
         }
         for(size_t i=0; i<100; i++) {
             std::string t = "abc" + std::to_string(i) + "abc";
-            strings_ptr.push_back(cd_pp_str_intern(&pp_state, (cd_pp_strview_t){ t.c_str(), t.c_str()+t.length()}));
+            strings_ptr.push_back(cd_pp_str_intern(&pp_state, cd_pp_strview_t{ t.c_str(), t.c_str()+t.length()}));
             strings.emplace_back(std::move(t));
         }
         assert(pp_state.str_map.fill == strings.size());
@@ -75,7 +76,7 @@ int main(int argc, const char * argv[]) {
         }
         for(size_t i=0; i<strings.size(); i++) {
             auto & t = strings[i];
-            auto * p = cd_pp_str_intern(&pp_state, (cd_pp_strview_t){ t.c_str(), t.c_str()+t.length()});
+            auto * p = cd_pp_str_intern(&pp_state, cd_pp_strview_t{ t.c_str(), t.c_str()+t.length()});
             assert(p == strings_ptr[i]);
         }
         assert(pp_state.str_map.fill == strings.size());
@@ -86,7 +87,7 @@ int main(int argc, const char * argv[]) {
         cd_pp_state_t pp_state = new_state();
         std::string text = "FOO BAR\n";
         bool ok = cd_pp_process(&pp_state,
-                             (cd_pp_strview_t){ text.c_str(), text.c_str() + text.length() },
+                             cd_pp_strview_t{ text.c_str(), text.c_str() + text.length() },
                              handle_include,
                              (void*)43);
         assert(ok);

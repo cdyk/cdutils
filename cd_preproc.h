@@ -504,7 +504,51 @@ const char* cd_pp_str_intern(cd_pp_state_t* state, const char* str)
 }
 
 
-bool cd_pp_parse_text(cd_pp_ctx_t* ctx, bool active, bool expect_eof)
+static bool cd_pp_parse_text(cd_pp_ctx_t* ctx, bool active, bool expect_eof);
+
+static bool cd_pp_parse_text_check(cd_pp_ctx_t* ctx, bool active, bool expect_eof)
+{
+    if(255 < ctx->state->recursion_depth) {
+        CD_PP_LOG_ERROR(ctx->state, "Excessive recursion");
+        return false;
+    }
+    ctx->state->recursion_depth++;
+    bool rv = cd_pp_parse_text(ctx, active, expect_eof);
+    ctx->state->recursion_depth--;
+    return rv;
+}
+
+static bool cd_pp_parse_if_elif_else(cd_pp_ctx_t* ctx, bool active, bool expect_eof)
+{
+    bool can_match = active;
+    const char* id = NULL;
+    do {
+        // parse const_expr
+        cd_pp_match_until_newline(ctx);
+        if(!cd_pp_parse_text_check(ctx, active, false)) return false;
+        assert(ctx->matched.kind == CD_PP_TOKEN_IDENTIFIER);
+        id = cd_pp_strview_intern(ctx->state, ctx->matched.text);
+    }
+    while(id == ctx->id_elif);
+    
+    if(id == ctx->id_else) {
+        cd_pp_match_until_newline(ctx);
+        if(!cd_pp_parse_text_check(ctx, active, false)) return false;
+        assert(ctx->matched.kind == CD_PP_TOKEN_IDENTIFIER);
+        id = cd_pp_strview_intern(ctx->state, ctx->matched.text);
+    }
+    
+    if(id == ctx->id_endif) {
+        cd_pp_match_until_newline(ctx);
+    }
+    else {
+        CD_PP_LOG_ERROR(ctx->state, "Expected #endif, got #%s", id);
+        return false;
+    }
+    return true;
+}
+
+static bool cd_pp_parse_text(cd_pp_ctx_t* ctx, bool active, bool expect_eof)
 {
     while(cd_pp_next_token(ctx)) {
 
@@ -525,21 +569,12 @@ bool cd_pp_parse_text(cd_pp_ctx_t* ctx, bool active, bool expect_eof)
                 }
                 return true;
             }
-
-            if(id == ctx->id_if) {
-                ctx->state->recursion_depth++;
-                cd_pp_parse_text(ctx, active, false);
-                ctx->state->recursion_depth--;
-                
-                if(!cd_pp_expect_token(ctx, CD_PP_TOKEN_HASH, "Expected #")) return false;
-                if(!cd_pp_expect_token(ctx, CD_PP_TOKEN_IDENTIFIER, "Expected identifier after #")) return false;
-                const char* id2 = cd_pp_strview_intern(ctx->state, ctx->matched.text);
-                if(id2 == ctx->id_endif) {
-                    
-                }
+            else if(id == ctx->id_if) {
+                if(!cd_pp_parse_if_elif_else(ctx, active, expect_eof)) return false;
             }
-
-            if(!cd_pp_output_line(ctx, line_start, forward)) return false;
+            else {
+                if(!cd_pp_output_line(ctx, line_start, forward)) return false;
+            }
         }
         else {
             if(!cd_pp_output_line(ctx, line_start, forward)) return false;
@@ -552,7 +587,6 @@ bool cd_pp_parse_text(cd_pp_ctx_t* ctx, bool active, bool expect_eof)
         }
     }
     return true;
-
 }
 
 void cd_pp_state_free(cd_pp_state_t* state)

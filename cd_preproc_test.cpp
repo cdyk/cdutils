@@ -107,6 +107,6 @@ int main(int argc, const char * argv[]) {
 
     //run_test("", "");
     //run_test("FOO BAR\n", "");
-    run_test("#if 1\nFOO\n#endif\n", "");
+    run_test("#if 1\nFOO\n#elif 1\nBAR\n#else\nBAZ\n#endif\n", "");
     return 0;
 }

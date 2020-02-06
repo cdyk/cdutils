@@ -86,7 +86,10 @@ void cd_pp_state_free(cd_pp_state_t* state);
 
 typedef enum {
     CD_PP_TOKEN_EOF         = 0,
-    CD_PP_TOKEN_HASH        = 35,
+    CD_PP_TOKEN_HASH        = '#',  // 35
+    CD_PP_TOKEN_LPARENS     = '(',  // 40
+    CD_PP_TOKEN_RPARENS     = ')',  // 41
+    CD_PP_TOKEN_BACKSLASH   = '\\', // 92
     CD_PP_TOKEN_LASTCHAR    = 255,
     CD_PP_TOKEN_DIGITS,
     CD_PP_TOKEN_IDENTIFIER,
@@ -129,7 +132,7 @@ static bool cd_pp_next_token(cd_pp_ctx_t* ctx)
     ctx->matched = ctx->current;
 start:
     if(ctx->input.end <= ctx->input.begin) {
-        ctx->current.text = (cd_pp_strview_t){0,0};
+        ctx->current.text = (cd_pp_strview_t){ctx->input.end,ctx->input.end};
         ctx->current.kind = CD_PP_TOKEN_EOF;
         return true;
     }
@@ -287,6 +290,11 @@ static bool cd_pp_match_token(cd_pp_ctx_t* ctx, cd_pp_token_kind_t kind)
         return true;
     }
     return false;
+}
+
+static bool cd_pp_connected_tokens(cd_pp_ctx_t* ctx)
+{
+    return ctx->matched.text.end == ctx->current.text.begin;
 }
 
 static bool cd_pp_expect_token(cd_pp_ctx_t* ctx, cd_pp_token_kind_t kind, const char* expectation)
@@ -503,6 +511,69 @@ const char* cd_pp_str_intern(cd_pp_state_t* state, const char* str)
     return cd_pp_strview_intern(state, (cd_pp_strview_t){str, str+strlen(str)});
 }
 
+static bool cd_pp_parse_define_args(cd_pp_ctx_t* ctx)
+{
+    // Currently ignore arguments as we don't support macros (yet?)
+    while(!cd_pp_match_token(ctx, CD_PP_TOKEN_RPARENS)) {
+        if(cd_pp_is_token(ctx, CD_PP_TOKEN_EOF)) {
+            CD_PP_LOG_ERROR(ctx->state, "EOF while scanning for end of define argument.");
+            return false;
+        }
+        else if(cd_pp_is_token(ctx, CD_PP_TOKEN_NEWLINE)) {
+            CD_PP_LOG_ERROR(ctx->state, "Newline while scanning for end of define argument.");
+            return false;
+        }
+        else if(cd_pp_is_token(ctx, CD_PP_TOKEN_LPARENS)) {
+            CD_PP_LOG_ERROR(ctx->state, "Nested paranthesises in define argument.");
+            return false;
+        }
+        cd_pp_next_token(ctx);
+    }
+    return true;
+}
+
+static bool cd_pp_parse_define(cd_pp_ctx_t* ctx, bool active)
+{
+    if(!active) {
+        cd_pp_match_until_newline(ctx);
+        return true;
+    }
+    
+    if(!cd_pp_expect_token(ctx, CD_PP_TOKEN_IDENTIFIER, "No identifier after define")) return false;
+    
+    const char* name = cd_pp_strview_intern(ctx->state, ctx->matched.text);
+
+    if(cd_pp_connected_tokens(ctx) && cd_pp_match_token(ctx, CD_PP_TOKEN_LPARENS)) {
+        if(!cd_pp_parse_define_args(ctx)) return false;
+    }
+    
+    while(!cd_pp_is_token(ctx, CD_PP_TOKEN_EOF)) {
+        if(cd_pp_match_token(ctx, CD_PP_TOKEN_BACKSLASH)) {
+            if(!cd_pp_expect_token(ctx, CD_PP_TOKEN_NEWLINE, "Expected newline after macro line-splicing backslash")) return false;
+        }
+        else if(cd_pp_match_token(ctx, CD_PP_TOKEN_NEWLINE)) {
+            break;
+        }
+        else {
+            
+            if(cd_pp_is_token(ctx, CD_PP_TOKEN_IDENTIFIER)) {
+                if(ctx->matched.kind == CD_PP_TOKEN_IDENTIFIER) {
+                    // add space
+                }
+                // substitute
+                // append token
+            }
+            else {
+                // append token
+            }
+            cd_pp_next_token(ctx);
+        }
+    }
+    
+    // add definition
+    
+    return true;
+}
 
 static bool cd_pp_parse_text(cd_pp_ctx_t* ctx, bool active, bool expect_eof);
 
@@ -559,6 +630,10 @@ static bool cd_pp_parse_text(cd_pp_ctx_t* ctx, bool active, bool expect_eof)
             if(!cd_pp_expect_token(ctx, CD_PP_TOKEN_IDENTIFIER, "Expected identifier after #")) return false;
             const char* id = cd_pp_strview_intern(ctx->state, ctx->matched.text);
 
+            if(id == ctx->id_define) {
+                if(!cd_pp_parse_define(ctx, active)) return false;
+            }
+            
             if(id == ctx->id_elif ||
                id == ctx->id_else ||
                id == ctx->id_endif)

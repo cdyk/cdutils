@@ -22,6 +22,7 @@ typedef struct {
 
 typedef struct cd_pp_state_t cd_pp_state_t;
 typedef struct cd_pp_str_item_t cd_pp_str_item_t;
+typedef struct cd_pp_token_t cd_pp_token_t;
 
 typedef void (*cd_pp_log_func_t)(void* log_data, cd_pp_loglevel_t level, const char* msg, ...);
 typedef bool (*cd_pp_output_func_t)(void* output_data, cd_pp_strview_t output);
@@ -48,6 +49,7 @@ struct cd_pp_str_item_t {
     char                str[0];
 };
 
+
 struct cd_pp_state_t {
     cd_pp_log_func_t        log_func;
     void*                   log_data;
@@ -58,6 +60,11 @@ struct cd_pp_state_t {
     cd_pp_map_t             str_map;
     cd_pp_arena_t           str_mem;
     unsigned                recursion_depth;
+    struct {
+        cd_pp_token_t*      data;
+        size_t              size;
+        size_t              capacity;
+    } tmp_tokens;
 };
 
 
@@ -83,6 +90,16 @@ void cd_pp_state_free(cd_pp_state_t* state);
 #define CD_PP_LOG_WARN(state, ...) CD_PP_LOG_WRAP(state, CD_PP_LOGLEVEL_WARN, __VA_ARGS__)
 #define CD_PP_LOG_ERROR(state, ...) CD_PP_LOG_WRAP(state, CD_PP_LOGLEVEL_ERROR, __VA_ARGS__)
 
+#define cd_pp_array_push(array, value) {                            \
+    if((array)->capacity <= (array)->size) {                        \
+        (array)->capacity = (array)->size ? 2*(array)->size : 16;   \
+        *((void**)&(array)->data) = cd_pp_realloc((array)->data,    \
+                                                sizeof((array)[0])* \
+                                                (array)->capacity); \
+    }                                                               \
+    (array)->data[(array)->size++] = (value);                       \
+}
+
 
 typedef enum {
     CD_PP_TOKEN_EOF         = 0,
@@ -102,13 +119,14 @@ typedef enum {
     CD_PP_TOKEN_SHIFT_LEFT,
     CD_PP_TOKEN_SHIFT_RIGHT,
     CD_PP_TOKEN_CONCAT,
-    CD_PP_TOKEN_NEWLINE
+    CD_PP_TOKEN_NEWLINE,
+    CD_PP_TOKEN_SUBST_SPACE         // Space in substitution rule
 } cd_pp_token_kind_t;
 
-typedef struct {
+struct  cd_pp_token_t {
     cd_pp_strview_t     text;
     cd_pp_token_kind_t  kind;
-} cd_pp_token_t;
+};
 
 typedef struct {
     cd_pp_state_t*      state;
@@ -126,6 +144,7 @@ typedef struct {
     const char*         id_endif;
     const char*         id_defined;
 } cd_pp_ctx_t;
+
 
 static bool cd_pp_next_token(cd_pp_ctx_t* ctx)
 {
@@ -339,6 +358,13 @@ static void* cd_pp_malloc(size_t size)
     return rv;
 }
 
+static void* cd_pp_realloc(void* ptr, size_t size)
+{
+    void* rv = realloc(ptr, size);
+    assert(rv != NULL);
+    return rv;
+}
+
 static void* cd_pp_calloc(size_t num, size_t size)
 {
     void* rv = calloc(num, size);
@@ -476,23 +502,27 @@ static size_t cd_pp_fnv_1a(const char* begin, const char* end)
     }
 }
 
-const char* cd_pp_strview_intern(cd_pp_state_t* state, cd_pp_strview_t str)
+static void cd_pp_strview_inplace_intern(cd_pp_state_t* state, cd_pp_strview_t* str)
 {
     assert(state);
-    assert(str.begin <= str.end);
-    if(str.begin == NULL || str.begin == str.end) {
-        return NULL;
+    assert(str->begin <= str->end);
+    if(str->begin == NULL || str->begin == str->end) {
+        str->begin = NULL;
+        str->end = NULL;
+        return;
     }
-    size_t length = str.end - str.begin;
+    size_t length = str->end - str->begin;
 
-    uint64_t hash = cd_pp_fnv_1a(str.begin, str.end);
+    uint64_t hash = cd_pp_fnv_1a(str->begin, str->end);
     hash = hash ? hash : 1; // hash should never be zero
     
     cd_pp_str_item_t* item = (cd_pp_str_item_t*)cd_pp_map_get(&state->str_map, hash);
     for(cd_pp_str_item_t* i = item; i != NULL; i = i->next) {
         if(i->length == length) {
-            if(strncmp(i->str, str.begin, length)==0) {
-                return i->str;
+            if(strncmp(i->str, str->begin, length)==0) {
+                str->begin = i->str;
+                str->end = i->str + length;
+                return;
             }
         }
     }
@@ -500,15 +530,25 @@ const char* cd_pp_strview_intern(cd_pp_state_t* state, cd_pp_strview_t str)
     cd_pp_str_item_t* new_item = (cd_pp_str_item_t*)cd_pp_arena_alloc(state, &state->str_mem, sizeof(cd_pp_str_item_t) + length + 1);
     new_item->next = item;
     new_item->length = length;
-    memcpy(new_item->str, str.begin, length);
+    memcpy(new_item->str, str->begin, length);
     new_item->str[length] = '\0';
     cd_pp_map_insert(&state->str_map, hash, (size_t)new_item);
-    return new_item->str;
+
+    str->begin = new_item->str;
+    str->end = new_item->str + length;
+}
+
+const char* cd_pp_strview_intern(cd_pp_state_t* state, cd_pp_strview_t str)
+{
+    cd_pp_strview_inplace_intern(state, &str);
+    return str.begin;
 }
 
 const char* cd_pp_str_intern(cd_pp_state_t* state, const char* str)
 {
-    return cd_pp_strview_intern(state, (cd_pp_strview_t){str, str+strlen(str)});
+    cd_pp_strview_t t = {str, str+strlen(str)};
+    cd_pp_strview_inplace_intern(state, &t);
+    return t.begin;
 }
 
 static bool cd_pp_parse_define_args(cd_pp_ctx_t* ctx)
@@ -547,31 +587,42 @@ static bool cd_pp_parse_define(cd_pp_ctx_t* ctx, bool active)
         if(!cd_pp_parse_define_args(ctx)) return false;
     }
     
+    const char* prev_tail = NULL;
     while(!cd_pp_is_token(ctx, CD_PP_TOKEN_EOF)) {
         if(cd_pp_match_token(ctx, CD_PP_TOKEN_BACKSLASH)) {
             if(!cd_pp_expect_token(ctx, CD_PP_TOKEN_NEWLINE, "Expected newline after macro line-splicing backslash")) return false;
+            cd_pp_token_t newline = ctx->matched;
+            cd_pp_strview_inplace_intern(ctx->state, &newline.text);
+            cd_pp_array_push(&ctx->state->tmp_tokens, newline);
+            prev_tail = ctx->matched.text.end;
         }
         else if(cd_pp_match_token(ctx, CD_PP_TOKEN_NEWLINE)) {
             break;
         }
         else {
-            
-            if(cd_pp_is_token(ctx, CD_PP_TOKEN_IDENTIFIER)) {
-                if(ctx->matched.kind == CD_PP_TOKEN_IDENTIFIER) {
-                    // add space
-                }
-                // substitute
-                // append token
-            }
-            else {
-                // append token
-            }
+
             cd_pp_next_token(ctx);
+
+            if(prev_tail != NULL) {
+                assert(prev_tail <= ctx->matched.text.begin);
+                cd_pp_token_t space = {
+                    { prev_tail, ctx->matched.text.begin},
+                    CD_PP_TOKEN_SUBST_SPACE
+                };
+                cd_pp_strview_inplace_intern(ctx->state, &space.text);
+                cd_pp_array_push(&ctx->state->tmp_tokens, space);
+            }
+            
+            cd_pp_token_t token = ctx->matched;
+            cd_pp_strview_inplace_intern(ctx->state, &token.text);
+            cd_pp_array_push(&ctx->state->tmp_tokens, token);
+            prev_tail = ctx->matched.text.end;
         }
     }
-    
     // add definition
-    
+    for(size_t i=0; i<ctx->state->tmp_tokens.size; i++) {
+        CD_PP_LOG_DEBUG(ctx->state, "'%s'", ctx->state->tmp_tokens.data[i].text.begin);
+    }
     return true;
 }
 
@@ -666,6 +717,7 @@ static bool cd_pp_parse_text(cd_pp_ctx_t* ctx, bool active, bool expect_eof)
 
 void cd_pp_state_free(cd_pp_state_t* state)
 {
+    free(state->tmp_tokens.data);
     cd_pp_map_free(&state->str_map);
     cd_pp_arena_free(&state->str_mem);
 }

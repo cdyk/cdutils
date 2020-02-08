@@ -59,12 +59,15 @@ struct cd_pp_state_t {
     void*                   handle_data;
     cd_pp_map_t             str_map;
     cd_pp_arena_t           str_mem;
+    cd_pp_map_t             def_map;
+    cd_pp_arena_t           def_mem;
     unsigned                recursion_depth;
     struct {
         cd_pp_token_t*      data;
         size_t              size;
         size_t              capacity;
     } tmp_tokens;
+    cd_pp_map_t             tmp_def_args;       // Tmp used map when parsing defines.
 };
 
 
@@ -108,6 +111,8 @@ typedef enum {
     CD_PP_TOKEN_RPARENS     = ')',  // 41
     CD_PP_TOKEN_BACKSLASH   = '\\', // 92
     CD_PP_TOKEN_LASTCHAR    = 255,
+    CD_PP_TOKEN_DOUBLEHASH,
+    CD_PP_TOKEN_ELLIPSIS,
     CD_PP_TOKEN_DIGITS,
     CD_PP_TOKEN_IDENTIFIER,
     CD_PP_TOKEN_AND,
@@ -118,15 +123,42 @@ typedef enum {
     CD_PP_TOKEN_NOT_EQUAL,
     CD_PP_TOKEN_SHIFT_LEFT,
     CD_PP_TOKEN_SHIFT_RIGHT,
-    CD_PP_TOKEN_CONCAT,
     CD_PP_TOKEN_NEWLINE,
-    CD_PP_TOKEN_SUBST_SPACE         // Space in substitution rule
+    CD_PP_TOKEN_SUBST_SPACE,        // Space in substitution rule
+    CD_PP_TOKEN_SUBST_ARG           // Arg to be inserted in substitution rule
 } cd_pp_token_kind_t;
 
 struct  cd_pp_token_t {
     cd_pp_strview_t     text;
     cd_pp_token_kind_t  kind;
 };
+
+static void cd_pp_print_token(cd_pp_state_t* state, cd_pp_token_t token)
+{
+    switch(token.kind) {
+    case CD_PP_TOKEN_EOF:           CD_PP_LOG_DEBUG(state, "Token: EOF"); break;
+    case CD_PP_TOKEN_HASH:          CD_PP_LOG_DEBUG(state, "Token: HASH          '%.*s'", (int)(token.text.end-token.text.begin), token.text.begin); break;
+    case CD_PP_TOKEN_LPARENS:       CD_PP_LOG_DEBUG(state, "Token: LPARENS       '%.*s'", (int)(token.text.end-token.text.begin), token.text.begin); break;
+    case CD_PP_TOKEN_RPARENS:       CD_PP_LOG_DEBUG(state, "Token: RPARENS       '%.*s'", (int)(token.text.end-token.text.begin), token.text.begin); break;
+    case CD_PP_TOKEN_BACKSLASH:     CD_PP_LOG_DEBUG(state, "Token: BACKSLASH     '%.*s'", (int)(token.text.end-token.text.begin), token.text.begin); break;
+    case CD_PP_TOKEN_DOUBLEHASH:    CD_PP_LOG_DEBUG(state, "Token: DOUBLEHASH    '%.*s'", (int)(token.text.end-token.text.begin), token.text.begin); break;
+    case CD_PP_TOKEN_ELLIPSIS:      CD_PP_LOG_DEBUG(state, "Token: ELLPISIS      '%.*s'", (int)(token.text.end-token.text.begin), token.text.begin); break;
+    case CD_PP_TOKEN_DIGITS:        CD_PP_LOG_DEBUG(state, "Token: DIGITS        '%.*s'", (int)(token.text.end-token.text.begin), token.text.begin); break;
+    case CD_PP_TOKEN_IDENTIFIER:    CD_PP_LOG_DEBUG(state, "Token: IDENTIFIER    '%.*s'", (int)(token.text.end-token.text.begin), token.text.begin); break;
+    case CD_PP_TOKEN_AND:           CD_PP_LOG_DEBUG(state, "Token: AND           '%.*s'", (int)(token.text.end-token.text.begin), token.text.begin); break;
+    case CD_PP_TOKEN_OR:            CD_PP_LOG_DEBUG(state, "Token: OR            '%.*s'", (int)(token.text.end-token.text.begin), token.text.begin); break;
+    case CD_PP_TOKEN_LESS_EQUAL:    CD_PP_LOG_DEBUG(state, "Token: LESS_EQUAL    '%.*s'", (int)(token.text.end-token.text.begin), token.text.begin); break;
+    case CD_PP_TOKEN_GREATER_EQUAL: CD_PP_LOG_DEBUG(state, "Token: GREATER_EQUAL '%.*s'", (int)(token.text.end-token.text.begin), token.text.begin); break;
+    case CD_PP_TOKEN_EQUAL:         CD_PP_LOG_DEBUG(state, "Token: EQUAL         '%.*s'", (int)(token.text.end-token.text.begin), token.text.begin); break;
+    case CD_PP_TOKEN_NOT_EQUAL:     CD_PP_LOG_DEBUG(state, "Token: NOT_EQUAL     '%.*s'", (int)(token.text.end-token.text.begin), token.text.begin); break;
+    case CD_PP_TOKEN_SHIFT_LEFT:    CD_PP_LOG_DEBUG(state, "Token: SHIFT_LEFT    '%.*s'", (int)(token.text.end-token.text.begin), token.text.begin); break;
+    case CD_PP_TOKEN_SHIFT_RIGHT:   CD_PP_LOG_DEBUG(state, "Token: SHIFT_RIGHT   '%.*s'", (int)(token.text.end-token.text.begin), token.text.begin); break;
+    case CD_PP_TOKEN_NEWLINE:       CD_PP_LOG_DEBUG(state, "Token: NEWLINE"); break;
+    case CD_PP_TOKEN_SUBST_SPACE:   CD_PP_LOG_DEBUG(state, "Token: SUBST_SPACE   '%.*s'", (int)(token.text.end-token.text.begin), token.text.begin); break;
+    case CD_PP_TOKEN_SUBST_ARG:     CD_PP_LOG_DEBUG(state, "Token: SUBST_ARG_%zd", (size_t)token.text.begin); break;
+    default:                        CD_PP_LOG_DEBUG(state, "Token:               '%.*s'", (int)(token.text.end-token.text.begin), token.text.begin); break;
+    }
+}
 
 typedef struct {
     cd_pp_state_t*      state;
@@ -143,6 +175,7 @@ typedef struct {
     const char*         id_else;
     const char*         id_endif;
     const char*         id_defined;
+    const char*         id_va_args;
 } cd_pp_ctx_t;
 
 
@@ -228,6 +261,20 @@ start:
     case '\n':
         ctx->current.kind = CD_PP_TOKEN_NEWLINE;
         break;
+    case '#':
+        ctx->current.kind = (cd_pp_token_kind_t)ctx->input.begin[-1];
+        if(ctx->input.begin < ctx->input.end && *ctx->input.begin == '#') {
+            ctx->current.kind = CD_PP_TOKEN_DOUBLEHASH;
+            ctx->input.begin++;
+        }
+        break;
+    case '.':
+        ctx->current.kind = (cd_pp_token_kind_t)ctx->input.begin[-1];
+        if(ctx->input.begin + 1 < ctx->input.end && ctx->input.begin[0] == '.' && ctx->input.begin[1] == '.') {
+            ctx->current.kind = CD_PP_TOKEN_ELLIPSIS;
+            ctx->input.begin += 2;
+        }
+        break;
     case '&':
         ctx->current.kind = (cd_pp_token_kind_t)ctx->input.begin[-1];
         if(ctx->input.begin < ctx->input.end && *ctx->input.begin == '&') {
@@ -278,16 +325,6 @@ start:
             ctx->input.begin++;
         }
         break;
-    case '#':
-        ctx->current.kind = (cd_pp_token_kind_t)ctx->input.begin[-1];
-        if(ctx->input.begin < ctx->input.end && *ctx->input.begin == '#') {
-            ctx->current.kind = CD_PP_TOKEN_CONCAT;
-            ctx->input.begin++;
-        }
-        break;
-
-            
-            
     default:
         ctx->current.kind = (cd_pp_token_kind_t)ctx->input.begin[-1];
         break;
@@ -474,6 +511,13 @@ static void cd_pp_map_insert(cd_pp_map_t* map, size_t key, size_t val)
     }
 }
 
+static void cd_pp_map_clear(cd_pp_map_t* map)
+{
+    if(map->fill == 0) return;
+    map->fill = 0;
+    memset(map->keys, 0, sizeof(map->keys[0])*map->capacity);
+}
+
 static void cd_pp_map_free(cd_pp_map_t* map)
 {
     free(map->keys);
@@ -551,25 +595,29 @@ const char* cd_pp_str_intern(cd_pp_state_t* state, const char* str)
     return t.begin;
 }
 
-static bool cd_pp_parse_define_args(cd_pp_ctx_t* ctx)
+typedef struct {
+    unsigned        args;
+    bool            varargs;
+    unsigned        token_count;
+    cd_pp_token_t   tokens[0];
+} cd_pp_def_t;
+
+static bool cd_pp_parse_define_args(cd_pp_ctx_t* ctx, cd_pp_def_t* def)
 {
-    // Currently ignore arguments as we don't support macros (yet?)
-    while(!cd_pp_match_token(ctx, CD_PP_TOKEN_RPARENS)) {
-        if(cd_pp_is_token(ctx, CD_PP_TOKEN_EOF)) {
-            CD_PP_LOG_ERROR(ctx->state, "EOF while scanning for end of define argument.");
-            return false;
+arg:
+    if(cd_pp_match_token(ctx, CD_PP_TOKEN_IDENTIFIER)) {
+        cd_pp_map_insert(&ctx->state->tmp_def_args,
+                         (size_t)cd_pp_strview_intern(ctx->state, ctx->matched.text),
+                         ++def->args);
+        if(cd_pp_match_token(ctx, (cd_pp_token_kind_t)',')) {
+            goto arg;
         }
-        else if(cd_pp_is_token(ctx, CD_PP_TOKEN_NEWLINE)) {
-            CD_PP_LOG_ERROR(ctx->state, "Newline while scanning for end of define argument.");
-            return false;
-        }
-        else if(cd_pp_is_token(ctx, CD_PP_TOKEN_LPARENS)) {
-            CD_PP_LOG_ERROR(ctx->state, "Nested paranthesises in define argument.");
-            return false;
-        }
-        cd_pp_next_token(ctx);
     }
-    return true;
+    else if(cd_pp_match_token(ctx, CD_PP_TOKEN_ELLIPSIS)) {
+        cd_pp_map_insert(&ctx->state->tmp_def_args, (size_t)ctx->id_va_args, ++def->args);
+        def->varargs = true;
+    }
+    return cd_pp_expect_token(ctx, CD_PP_TOKEN_RPARENS, "Unexpected token in define arguments");
 }
 
 static bool cd_pp_parse_define(cd_pp_ctx_t* ctx, bool active)
@@ -583,8 +631,11 @@ static bool cd_pp_parse_define(cd_pp_ctx_t* ctx, bool active)
     
     const char* name = cd_pp_strview_intern(ctx->state, ctx->matched.text);
 
+    cd_pp_map_clear(&ctx->state->tmp_def_args);
+    cd_pp_def_t def = {};
+    
     if(cd_pp_connected_tokens(ctx) && cd_pp_match_token(ctx, CD_PP_TOKEN_LPARENS)) {
-        if(!cd_pp_parse_define_args(ctx)) return false;
+        if(!cd_pp_parse_define_args(ctx, &def)) return false;
     }
     
     const char* prev_tail = NULL;
@@ -600,9 +651,7 @@ static bool cd_pp_parse_define(cd_pp_ctx_t* ctx, bool active)
             break;
         }
         else {
-
             cd_pp_next_token(ctx);
-
             if(prev_tail != NULL) {
                 assert(prev_tail <= ctx->matched.text.begin);
                 cd_pp_token_t space = {
@@ -612,17 +661,34 @@ static bool cd_pp_parse_define(cd_pp_ctx_t* ctx, bool active)
                 cd_pp_strview_inplace_intern(ctx->state, &space.text);
                 cd_pp_array_push(&ctx->state->tmp_tokens, space);
             }
-            
+            prev_tail = ctx->matched.text.end;
+
             cd_pp_token_t token = ctx->matched;
             cd_pp_strview_inplace_intern(ctx->state, &token.text);
+            if(def.args && ctx->matched.kind == CD_PP_TOKEN_IDENTIFIER) {
+                size_t arg = cd_pp_map_get(&ctx->state->tmp_def_args, (size_t)token.text.begin);
+                if(arg) {
+                    token.kind = CD_PP_TOKEN_SUBST_ARG;
+                    token.text.begin = token.text.end = (const char*)arg-1;
+                }
+            }
             cd_pp_array_push(&ctx->state->tmp_tokens, token);
-            prev_tail = ctx->matched.text.end;
         }
     }
     // add definition
-    for(size_t i=0; i<ctx->state->tmp_tokens.size; i++) {
-        CD_PP_LOG_DEBUG(ctx->state, "'%s'", ctx->state->tmp_tokens.data[i].text.begin);
-    }
+    size_t token_count = ctx->state->tmp_tokens.size;
+    cd_pp_def_t* def_ptr = (cd_pp_def_t*)cd_pp_arena_alloc(ctx->state,
+                                                           &ctx->state->def_mem,
+                                                           sizeof(cd_pp_def_t) +
+                                                           sizeof(cd_pp_token_t) * token_count);
+    *def_ptr = def;
+    def_ptr->token_count = (unsigned)token_count;
+    memcpy(def_ptr->tokens, ctx->state->tmp_tokens.data, sizeof(cd_pp_token_t) * token_count);
+    cd_pp_map_insert(&ctx->state->def_map, (size_t)name, (size_t)def_ptr);
+    
+    //for(size_t i=0; i<def_ptr->token_count; i++) {
+    //    cd_pp_print_token(ctx->state, def_ptr->tokens[i]);
+    //}
     return true;
 }
 
@@ -684,11 +750,7 @@ static bool cd_pp_parse_text(cd_pp_ctx_t* ctx, bool active, bool expect_eof)
             if(id == ctx->id_define) {
                 if(!cd_pp_parse_define(ctx, active)) return false;
             }
-            
-            if(id == ctx->id_elif ||
-               id == ctx->id_else ||
-               id == ctx->id_endif)
-            {
+            else if(id == ctx->id_elif || id == ctx->id_else || id == ctx->id_endif) {
                 if(expect_eof) {
                     CD_PP_LOG_ERROR(ctx->state, "Expected EOF, got #%s", id);
                     return false;
@@ -737,7 +799,8 @@ bool cd_pp_process(cd_pp_state_t*           state,
         .id_elif = cd_pp_str_intern(state, "elif"),
         .id_else = cd_pp_str_intern(state, "else"),
         .id_endif = cd_pp_str_intern(state, "endif"),
-        .id_defined = cd_pp_str_intern(state, "defined")
+        .id_defined = cd_pp_str_intern(state, "defined"),
+        .id_va_args = cd_pp_str_intern(state, "__VA_ARGS__")
     };
     return cd_pp_parse_text(&ctx, true, true);
 }

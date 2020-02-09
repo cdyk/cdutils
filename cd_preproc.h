@@ -49,6 +49,11 @@ struct cd_pp_str_item_t {
     char                str[0];
 };
 
+typedef struct {
+    cd_pp_token_t*      data;
+    size_t              size;
+    size_t              capacity;
+} cd_pp_tokenlist_t;
 
 struct cd_pp_state_t {
     cd_pp_log_func_t        log_func;
@@ -61,12 +66,15 @@ struct cd_pp_state_t {
     cd_pp_arena_t           str_mem;
     cd_pp_map_t             def_map;
     cd_pp_arena_t           def_mem;
+    cd_pp_map_t             def_used;
+    cd_pp_map_t             def_use;
     unsigned                recursion_depth;
+    cd_pp_tokenlist_t       tmp_tokens;
     struct {
-        cd_pp_token_t*      data;
+        cd_pp_tokenlist_t*  data;
         size_t              size;
         size_t              capacity;
-    } tmp_tokens;
+    }                       def_invoke_args;
     cd_pp_map_t             tmp_def_args;       // Tmp used map when parsing defines.
 };
 
@@ -103,6 +111,7 @@ void cd_pp_state_free(cd_pp_state_t* state);
     (array)->data[(array)->size++] = (value);                       \
 }
 
+#define cd_pp_array_clear(array) { (array)->size = 0; }
 
 typedef enum {
     CD_PP_TOKEN_EOF         = 0,
@@ -132,6 +141,13 @@ struct  cd_pp_token_t {
     cd_pp_strview_t     text;
     cd_pp_token_kind_t  kind;
 };
+
+typedef struct {
+    unsigned        args;
+    bool            varargs;
+    unsigned        token_count;
+    cd_pp_token_t   tokens[0];
+} cd_pp_def_t;
 
 static void cd_pp_print_token(cd_pp_state_t* state, cd_pp_token_t token)
 {
@@ -178,6 +194,7 @@ typedef struct {
     const char*         id_va_args;
 } cd_pp_ctx_t;
 
+static bool cd_pp_parse_group(cd_pp_ctx_t* ctx, bool active, bool expect_eof);
 
 static bool cd_pp_next_token(cd_pp_ctx_t* ctx)
 {
@@ -331,6 +348,7 @@ start:
     }
 done:
     ctx->current.text.end = ctx->input.begin;
+    cd_pp_print_token(ctx->state, ctx->current);
     return true;
 }
 
@@ -366,26 +384,13 @@ static bool cd_pp_expect_token(cd_pp_ctx_t* ctx, cd_pp_token_kind_t kind, const 
     return false;
 }
 
-static void cd_pp_match_until_newline(cd_pp_ctx_t* ctx)
+// Matches rest of line, including the newline token
+static void cd_pp_skip_rest_of_line(cd_pp_ctx_t* ctx)
 {
-    while(ctx->current.kind != CD_PP_TOKEN_NEWLINE &&
-          ctx->current.kind != CD_PP_TOKEN_EOF)
-    {
+    while(!cd_pp_match_token(ctx, CD_PP_TOKEN_NEWLINE)) {
+        if(cd_pp_is_token(ctx, CD_PP_TOKEN_EOF)) return;
         cd_pp_next_token(ctx);
     }
-}
-
-static bool cd_pp_output_line(cd_pp_ctx_t* ctx, const char* line_start, bool active)
-{
-    cd_pp_match_until_newline(ctx);
-    if(active && ctx->state->output_func) {
-        if(!ctx->state->output_func(ctx->state->output_data,
-                                    (cd_pp_strview_t){line_start, ctx->current.text.end}))
-        {
-            return false;
-        }
-    }
-    return true;
 }
 
 static void* cd_pp_malloc(size_t size)
@@ -595,13 +600,6 @@ const char* cd_pp_str_intern(cd_pp_state_t* state, const char* str)
     return t.begin;
 }
 
-typedef struct {
-    unsigned        args;
-    bool            varargs;
-    unsigned        token_count;
-    cd_pp_token_t   tokens[0];
-} cd_pp_def_t;
-
 static bool cd_pp_parse_define_args(cd_pp_ctx_t* ctx, cd_pp_def_t* def)
 {
 arg:
@@ -623,7 +621,7 @@ arg:
 static bool cd_pp_parse_define(cd_pp_ctx_t* ctx, bool active)
 {
     if(!active) {
-        cd_pp_match_until_newline(ctx);
+        cd_pp_skip_rest_of_line(ctx);
         return true;
     }
     
@@ -692,42 +690,28 @@ static bool cd_pp_parse_define(cd_pp_ctx_t* ctx, bool active)
     return true;
 }
 
-static bool cd_pp_parse_text(cd_pp_ctx_t* ctx, bool active, bool expect_eof);
-
-static bool cd_pp_parse_text_check(cd_pp_ctx_t* ctx, bool active, bool expect_eof)
-{
-    if(255 < ctx->state->recursion_depth) {
-        CD_PP_LOG_ERROR(ctx->state, "Excessive recursion");
-        return false;
-    }
-    ctx->state->recursion_depth++;
-    bool rv = cd_pp_parse_text(ctx, active, expect_eof);
-    ctx->state->recursion_depth--;
-    return rv;
-}
-
 static bool cd_pp_parse_if_elif_else(cd_pp_ctx_t* ctx, bool active, bool expect_eof)
 {
-    bool can_match = active;
+    //bool can_match = active;
     const char* id = NULL;
     do {
         // parse const_expr
-        cd_pp_match_until_newline(ctx);
-        if(!cd_pp_parse_text_check(ctx, active, false)) return false;
+        cd_pp_skip_rest_of_line(ctx);
+        if(!cd_pp_parse_group(ctx, active, false)) return false;
         assert(ctx->matched.kind == CD_PP_TOKEN_IDENTIFIER);
         id = cd_pp_strview_intern(ctx->state, ctx->matched.text);
     }
     while(id == ctx->id_elif);
     
     if(id == ctx->id_else) {
-        cd_pp_match_until_newline(ctx);
-        if(!cd_pp_parse_text_check(ctx, active, false)) return false;
+        cd_pp_skip_rest_of_line(ctx);
+        if(!cd_pp_parse_group(ctx, active, false)) return false;
         assert(ctx->matched.kind == CD_PP_TOKEN_IDENTIFIER);
         id = cd_pp_strview_intern(ctx->state, ctx->matched.text);
     }
     
     if(id == ctx->id_endif) {
-        cd_pp_match_until_newline(ctx);
+        cd_pp_skip_rest_of_line(ctx);
     }
     else {
         CD_PP_LOG_ERROR(ctx->state, "Expected #endif, got #%s", id);
@@ -736,45 +720,163 @@ static bool cd_pp_parse_if_elif_else(cd_pp_ctx_t* ctx, bool active, bool expect_
     return true;
 }
 
-static bool cd_pp_parse_text(cd_pp_ctx_t* ctx, bool active, bool expect_eof)
+static bool cd_pp_parse_declaration(cd_pp_ctx_t* ctx, bool* end_block, bool active, bool expect_eof)
 {
-    while(cd_pp_next_token(ctx)) {
+    CD_PP_LOG_DEBUG(ctx->state, "> parse declaration");
 
-        bool forward = active;
-        const char* line_start = ctx->current.text.begin;
+    *end_block = false;
+    cd_pp_state_t* state = ctx->state;
+    const char* line_start = ctx->current.text.begin;
+
+    assert(ctx->current.kind = CD_PP_TOKEN_HASH);
+    cd_pp_next_token(ctx);
+
+    if(!cd_pp_expect_token(ctx, CD_PP_TOKEN_IDENTIFIER, "Expected identifier after #")) return false;
+
+    const char* directive = cd_pp_strview_intern(ctx->state, ctx->matched.text);
+    if(directive == ctx->id_define) {
+        if(!cd_pp_parse_define(ctx, active)) return false;
+    }
+    else if(directive == ctx->id_if || directive == ctx->id_ifdef || directive == ctx->id_ifndef) {
+        return cd_pp_parse_if_elif_else(ctx, active, expect_eof);
+    }
+    else if(directive == ctx->id_elif || directive == ctx->id_else || directive == ctx->id_endif) {
+        // Terminate this group, check if we expect EOF or terminating directive
+        *end_block = true;
+        if(expect_eof) {
+            CD_PP_LOG_ERROR(ctx->state, "Expected EOF, got #%s", directive);
+            return false;
+        }
+        CD_PP_LOG_DEBUG(ctx->state, "< parse declaration");
+        return true;
+    }
+    else {
+        // Unrecognized directive, just output without any substitution
+        while(!cd_pp_is_token(ctx, CD_PP_TOKEN_EOF) || !cd_pp_match_token(ctx, CD_PP_TOKEN_NEWLINE)) {
+            cd_pp_next_token(ctx);
+        }
+        if(active && state->output_func) {
+            cd_pp_strview_t line = { line_start, ctx->matched.text.end };
+            if(!state->output_func(state->output_data, line)) return false;
+        }
+    }
+    CD_PP_LOG_DEBUG(ctx->state, "< parse declaration");
+    return true;
+}
+
+static bool cd_pp_process_tokens(cd_pp_ctx_t* ctx, bool* needs_processing)
+{
+    *needs_processing = false;
+    return true;
+}
+
+static bool cd_pp_parse_text_line(cd_pp_ctx_t* ctx, bool active)
+{
+    if(!active) {   // Just skip the line of text as we're not in an active group
+        CD_PP_LOG_DEBUG(ctx->state, "> parse text line [inactive]");
+        cd_pp_skip_rest_of_line(ctx);
+        CD_PP_LOG_DEBUG(ctx->state, "< parse text line [inactive]");
+        return true;
+    }
+    CD_PP_LOG_DEBUG(ctx->state, "> parse text line");
+    cd_pp_state_t* state = ctx->state;
+
+    // Gather a line of tokens
+    bool needs_processing = false;
+    const char* prev_tail = NULL;
+    cd_pp_tokenlist_t* tokens = &ctx->state->tmp_tokens;
+    cd_pp_array_clear(tokens);
+    while(!cd_pp_is_token(ctx, CD_PP_TOKEN_EOF)) {
+        cd_pp_next_token(ctx);  // match not EOF
+
+        cd_pp_token_t token = ctx->matched;
         
-        if(cd_pp_match_token(ctx, CD_PP_TOKEN_HASH)) {
-            if(!cd_pp_expect_token(ctx, CD_PP_TOKEN_IDENTIFIER, "Expected identifier after #")) return false;
-            const char* id = cd_pp_strview_intern(ctx->state, ctx->matched.text);
+        if(prev_tail != NULL && prev_tail < token.text.begin) {
+            cd_pp_token_t space = {
+                { prev_tail, token.text.begin},
+                CD_PP_TOKEN_SUBST_SPACE
+            };
+            cd_pp_array_push(tokens, space);
+        }
+        prev_tail = token.text.end;
 
-            if(id == ctx->id_define) {
-                if(!cd_pp_parse_define(ctx, active)) return false;
-            }
-            else if(id == ctx->id_elif || id == ctx->id_else || id == ctx->id_endif) {
-                if(expect_eof) {
-                    CD_PP_LOG_ERROR(ctx->state, "Expected EOF, got #%s", id);
-                    return false;
+        if(token.kind == CD_PP_TOKEN_IDENTIFIER) {
+            cd_pp_strview_inplace_intern(state, &token.text);
+            needs_processing = needs_processing || (cd_pp_map_get(&state->def_map, (size_t)token.text.begin) != 0);
+        }
+        
+        cd_pp_array_push(tokens, token);
+        if(token.kind == CD_PP_TOKEN_NEWLINE) break;
+    }
+    CD_PP_LOG_DEBUG(ctx->state, "- %zu tokens (needs processing = %d)", tokens->size, needs_processing ? 1 : 0);
+
+
+    if(needs_processing) {
+        cd_pp_map_clear(&state->def_used);
+        cd_pp_map_clear(&state->def_use);
+        do {
+            if(!cd_pp_process_tokens(ctx, &needs_processing)) return false;
+            if(needs_processing) {
+                for(size_t i=0; i<state->def_use.capacity; i++) {
+                    if(state->def_use.keys[i]) {
+                        CD_PP_LOG_DEBUG(state, "Used define %*s", (const char*)state->def_use.keys[i]);
+                        cd_pp_map_insert(&state->def_used, state->def_use.keys[i], 1);
+                    }
                 }
-                return true;
+                cd_pp_map_clear(&state->def_use);
             }
-            else if(id == ctx->id_if) {
-                if(!cd_pp_parse_if_elif_else(ctx, active, expect_eof)) return false;
+         } while(needs_processing);
+    }
+
+    // Output tokens
+    if(state->output_func) {
+        for(size_t i=0; i<tokens->size; i++) {
+            if(!state->output_func(state->output_data, tokens->data[i].text)) {
+                return false;
             }
-            else {
-                if(!cd_pp_output_line(ctx, line_start, forward)) return false;
+        }
+    }
+    CD_PP_LOG_DEBUG(ctx->state, "< parse text line");
+    return true;
+}
+
+// Process block of input, either terminated by EOF or #endif, #elif, #else
+// Recurses for #if, #ifdef, #ifndef
+static bool cd_pp_parse_group(cd_pp_ctx_t* ctx, bool active, bool expect_eof)
+{
+    if(255 < ctx->state->recursion_depth) {
+        CD_PP_LOG_ERROR(ctx->state, "Excessive recursion");
+        return false;
+    }
+    CD_PP_LOG_DEBUG(ctx->state, "> parse group");
+    ctx->state->recursion_depth++;
+
+    while(!cd_pp_match_token(ctx, CD_PP_TOKEN_EOF)) {
+        if(cd_pp_is_token(ctx, CD_PP_TOKEN_HASH)) {
+            bool end_block = false;
+            if(!cd_pp_parse_declaration(ctx, &end_block, active, expect_eof)) goto fail;
+            if(end_block) {
+                goto success;
             }
         }
         else {
-            if(!cd_pp_output_line(ctx, line_start, forward)) return false;
-        }
-        if(ctx->current.kind == CD_PP_TOKEN_EOF) {
-            if(!expect_eof) {
-                CD_PP_LOG_ERROR(ctx->state, "Unexpected EOF");
-            }
-            return expect_eof;
+            if(!cd_pp_parse_text_line(ctx, active)) goto fail;
         }
     }
+    assert(ctx->matched.kind == CD_PP_TOKEN_EOF);
+    if(!expect_eof) {
+        CD_PP_LOG_ERROR(ctx->state, "Unexpected EOF");
+        goto fail;
+    }
+
+success:
+    CD_PP_LOG_DEBUG(ctx->state, "< parse group");
+    ctx->state->recursion_depth--;
     return true;
+fail:
+    CD_PP_LOG_DEBUG(ctx->state, "< parse group (failure)");
+    ctx->state->recursion_depth--;
+    return false;
 }
 
 void cd_pp_state_free(cd_pp_state_t* state)
@@ -802,7 +904,8 @@ bool cd_pp_process(cd_pp_state_t*           state,
         .id_defined = cd_pp_str_intern(state, "defined"),
         .id_va_args = cd_pp_str_intern(state, "__VA_ARGS__")
     };
-    return cd_pp_parse_text(&ctx, true, true);
+    cd_pp_next_token(&ctx);
+    return cd_pp_parse_group(&ctx, true, true);
 }
 
 
